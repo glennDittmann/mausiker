@@ -9,6 +9,7 @@ use lofty::{
     file::AudioFile,
     prelude::{Accessor, TaggedFileExt},
     read_from_path,
+    tag::ItemKey,
 };
 use ratatui::{
     DefaultTerminal, Frame,
@@ -69,6 +70,7 @@ struct Track {
     path: PathBuf,
     title: String,
     artist: String,
+    album_artist: String,
     album: String,
     duration: Option<Duration>,
     bytes: u64,
@@ -190,12 +192,12 @@ fn group_by_album(tracks: Vec<Track>) -> Vec<Album> {
     for track in tracks {
         if let Some(album) = albums
             .iter_mut()
-            .find(|album| album.artist == track.artist && album.title == track.album)
+            .find(|album| album.artist == track.album_artist && album.title == track.album)
         {
             album.tracks.push(track);
         } else {
             albums.push(Album {
-                artist: track.artist.clone(),
+                artist: track.album_artist.clone(),
                 title: track.album.clone(),
                 tracks: vec![track],
             });
@@ -253,6 +255,13 @@ fn read_track(path: &Path) -> lofty::error::Result<Track> {
             .and_then(|tag| tag.artist())
             .map(|value| value.into_owned())
             .unwrap_or_else(|| "Unknown artist".into()),
+        album_artist: tag
+            .and_then(|tag| tag.get_string(ItemKey::AlbumArtist))
+            .map(ToOwned::to_owned)
+            .filter(|artist| !artist.trim().is_empty())
+            .unwrap_or_else(|| {
+                main_artist_from_credit(tag.and_then(|tag| tag.artist()).as_deref())
+            }),
         album: tag
             .and_then(|tag| tag.album())
             .map(|value| value.into_owned())
@@ -262,6 +271,25 @@ fn read_track(path: &Path) -> lofty::error::Result<Track> {
             .map(|metadata| metadata.len())
             .unwrap_or(0),
     })
+}
+
+fn main_artist_from_credit(artist: Option<&str>) -> String {
+    let artist = artist.unwrap_or("Unknown artist").trim();
+    let lowercase = artist.to_ascii_lowercase();
+    for marker in [
+        " featuring ",
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " ft ",
+        " & ",
+        "; ",
+    ] {
+        if let Some(position) = lowercase.find(marker) {
+            return artist[..position].trim().to_owned();
+        }
+    }
+    artist.to_owned()
 }
 
 fn render(frame: &mut Frame, app: &mut App) {
