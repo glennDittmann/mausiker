@@ -176,8 +176,18 @@ impl App {
     }
 
     fn collapse_selected_album(&mut self) {
-        if let Some(LibraryRow::Album(album)) = self.selected_row() {
+        let selected_row = self.selected_row();
+        let album = match selected_row {
+            Some(LibraryRow::Album(album) | LibraryRow::Track { album, .. }) => album,
+            None => return,
+        };
+        if let Some(album_row) = self
+            .visible_rows()
+            .iter()
+            .position(|row| matches!(row, LibraryRow::Album(index) if *index == album))
+        {
             self.expanded_albums.remove(&album);
+            self.state.select(Some(album_row));
         }
     }
 
