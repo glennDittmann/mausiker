@@ -72,6 +72,7 @@ struct Track {
     artist: String,
     album_artist: String,
     album: String,
+    track_number: Option<u32>,
     duration: Option<Duration>,
     bytes: u64,
 }
@@ -203,6 +204,14 @@ fn group_by_album(tracks: Vec<Track>) -> Vec<Album> {
             });
         }
     }
+    for album in &mut albums {
+        album.tracks.sort_by(|left, right| {
+            left.track_number
+                .unwrap_or(u32::MAX)
+                .cmp(&right.track_number.unwrap_or(u32::MAX))
+                .then(left.title.cmp(&right.title))
+        });
+    }
     albums
 }
 
@@ -266,6 +275,7 @@ fn read_track(path: &Path) -> lofty::error::Result<Track> {
             .and_then(|tag| tag.album())
             .map(|value| value.into_owned())
             .unwrap_or_else(|| "Unknown album".into()),
+        track_number: tag.and_then(|tag| tag.track()),
         duration: Some(tagged_file.properties().duration()),
         bytes: fs::metadata(path)
             .map(|metadata| metadata.len())
@@ -358,7 +368,14 @@ fn render(frame: &mut Frame, app: &mut App) {
         LibraryRow::Track { album, track } => {
             let track = &app.albums[album].tracks[track];
             Row::new([
-                Cell::from(format!("  └─ {}", track.title)),
+                Cell::from(format!(
+                    "  └─ {}  {}",
+                    track
+                        .track_number
+                        .map(|number| format!("{number:02}"))
+                        .unwrap_or_else(|| "--".into()),
+                    track.title
+                )),
                 Cell::from(track.artist.clone()),
                 Cell::from(""),
                 Cell::from(
