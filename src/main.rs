@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     env, fs, io,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use lofty::{
@@ -15,7 +15,7 @@ use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 use walkdir::WalkDir;
@@ -35,13 +35,33 @@ fn app(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
 
     loop {
         terminal.draw(|frame| render(frame, &mut app))?;
+        if !crossterm::event::poll(Duration::from_millis(200))? {
+            continue;
+        }
         if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
             if !key.is_press() {
                 continue;
             }
+            if app.search_input.is_some() {
+                app.handle_search_key(key.code);
+                continue;
+            }
+            if key.code == crossterm::event::KeyCode::Char('k')
+                && key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+            {
+                app.open_search();
+                continue;
+            }
             match key.code {
-                crossterm::event::KeyCode::Char('q') | crossterm::event::KeyCode::Esc => {
+                crossterm::event::KeyCode::Char('q') => {
                     break Ok(());
+                }
+                crossterm::event::KeyCode::Esc => {
+                    if !app.clear_search() {
+                        break Ok(());
+                    }
                 }
                 crossterm::event::KeyCode::Char('r') => app.rescan(),
                 crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
@@ -96,6 +116,9 @@ struct App {
     expanded_albums: BTreeSet<usize>,
     unreadable: usize,
     state: TableState,
+    search: Option<String>,
+    search_input: Option<String>,
+    started_at: Instant,
 }
 
 impl App {
@@ -112,6 +135,9 @@ impl App {
             expanded_albums: BTreeSet::new(),
             unreadable,
             state,
+            search: None,
+            search_input: None,
+            started_at: Instant::now(),
         }
     }
 
@@ -148,6 +174,7 @@ impl App {
         self.albums
             .iter()
             .enumerate()
+            .filter(|(_, album)| self.album_matches_search(album))
             .flat_map(|(album_index, album)| {
                 let mut rows = vec![LibraryRow::Album(album_index)];
                 if self.expanded_albums.contains(&album_index) {
@@ -159,6 +186,49 @@ impl App {
                 rows
             })
             .collect()
+    }
+
+    fn album_matches_search(&self, album: &Album) -> bool {
+        let Some(search) = &self.search else {
+            return true;
+        };
+        album.title.to_lowercase().contains(search)
+            || album.artist.to_lowercase().contains(search)
+            || album
+                .tracks
+                .iter()
+                .any(|track| track.artist.to_lowercase().contains(search))
+    }
+
+    fn open_search(&mut self) {
+        self.search_input = Some(String::new());
+    }
+
+    fn clear_search(&mut self) -> bool {
+        if self.search.take().is_none() {
+            return false;
+        }
+        self.state
+            .select((!self.visible_rows().is_empty()).then_some(0));
+        true
+    }
+
+    fn handle_search_key(&mut self, key: crossterm::event::KeyCode) {
+        let input = self.search_input.as_mut().expect("search mode is active");
+        match key {
+            crossterm::event::KeyCode::Char(character) => input.push(character),
+            crossterm::event::KeyCode::Backspace => {
+                input.pop();
+            }
+            crossterm::event::KeyCode::Esc => self.search_input = None,
+            crossterm::event::KeyCode::Enter => {
+                self.search = (!input.trim().is_empty()).then(|| input.trim().to_lowercase());
+                self.search_input = None;
+                self.state
+                    .select((!self.visible_rows().is_empty()).then_some(0));
+            }
+            _ => {}
+        }
     }
 
     fn expand_selected_album(&mut self) {
@@ -336,9 +406,26 @@ fn render(frame: &mut Frame, app: &mut App) {
         format_bytes(total_bytes),
         app.unreadable
     );
+    let summary = if let Some(search) = &app.search {
+        let pulse_is_bright = (app.started_at.elapsed().as_millis() / 650).is_multiple_of(2);
+        let badge_style = Style::default()
+            .fg(Color::Black)
+            .bg(if pulse_is_bright {
+                Color::Yellow
+            } else {
+                Color::LightYellow
+            })
+            .add_modifier(Modifier::BOLD);
+        Line::from(vec![
+            Span::raw(summary),
+            Span::raw("  "),
+            Span::styled(format!(" FILTER ACTIVE: {search} "), badge_style),
+        ])
+    } else {
+        Line::from(summary)
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(summary))
-            .block(Block::default().borders(Borders::ALL).title(title)),
+        Paragraph::new(summary).block(Block::default().borders(Borders::ALL).title(title)),
         header,
     );
 
@@ -426,9 +513,16 @@ fn render(frame: &mut Frame, app: &mut App) {
     );
     frame.render_stateful_widget(table, table_area, &mut app.state);
 
+    let footer_text = if let Some(input) = &app.search_input {
+        format!("Search albums/artists: {input}  · Enter apply · Esc cancel · empty Enter clears")
+    } else if app.search.is_some() {
+        "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · Esc clear filter · q quit".into()
+    } else {
+        "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · r rescan · q quit"
+            .into()
+    };
     frame.render_widget(
-        Paragraph::new("↑/k ↓/j select · Enter toggle · → expand · ← collapse · r rescan · q quit")
-            .block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL)),
         footer,
     );
 }

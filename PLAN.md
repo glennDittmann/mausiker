@@ -7,6 +7,9 @@
   - [x] Show the total track duration on each album row
   - [x] Sort tracks by track number and show zero-padded prefixes
   - [x] Collapse an album from its header or any selected track
+  - [x] Search albums and artists with Ctrl-K, with a reversible filter
+  - [x] Make active search filters prominent with a subtle visual pulse
+  - [x] Include featured track artists in album search results
   - [ ] Define and apply a cohesive color scheme
 - [ ] Safe conversion queue: separate output folder, metadata preservation, verification, and explicit original-file deletion
 
