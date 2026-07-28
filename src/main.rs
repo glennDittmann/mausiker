@@ -49,10 +49,12 @@ fn app(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
                     app.previous();
                 }
-                crossterm::event::KeyCode::Enter
-                | crossterm::event::KeyCode::Char(' ')
-                | crossterm::event::KeyCode::Right
-                | crossterm::event::KeyCode::Char('l') => app.expand_selected_album(),
+                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
+                    app.toggle_selected_album();
+                }
+                crossterm::event::KeyCode::Right | crossterm::event::KeyCode::Char('l') => {
+                    app.expand_selected_album();
+                }
                 crossterm::event::KeyCode::Left | crossterm::event::KeyCode::Char('h') => {
                     app.collapse_selected_album();
                 }
@@ -159,6 +161,14 @@ impl App {
     fn expand_selected_album(&mut self) {
         if let Some(LibraryRow::Album(album)) = self.selected_row() {
             self.expanded_albums.insert(album);
+        }
+    }
+
+    fn toggle_selected_album(&mut self) {
+        if let Some(LibraryRow::Album(album)) = self.selected_row() {
+            if !self.expanded_albums.remove(&album) {
+                self.expanded_albums.insert(album);
+            }
         }
     }
 
@@ -358,10 +368,8 @@ fn render(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(table, table_area, &mut app.state);
 
     frame.render_widget(
-        Paragraph::new(
-            "↑/k ↓/j select · Enter/→ expand album · ← collapse album · r rescan · q quit",
-        )
-        .block(Block::default().borders(Borders::ALL)),
+        Paragraph::new("↑/k ↓/j select · Enter toggle · → expand · ← collapse · r rescan · q quit")
+            .block(Block::default().borders(Borders::ALL)),
         footer,
     );
 }
