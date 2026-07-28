@@ -339,7 +339,11 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(format!("{marker} {}", album.title)),
                 Cell::from(album.artist.clone()),
                 Cell::from(format!("{} tracks", album.tracks.len())),
-                Cell::from(""),
+                Cell::from(
+                    album_duration(&album.tracks)
+                        .map(format_duration)
+                        .unwrap_or_else(|| "—".into()),
+                ),
                 Cell::from("ALBUM"),
                 Cell::from(format_bytes(
                     album.tracks.iter().map(|track| track.bytes).sum(),
@@ -405,6 +409,13 @@ fn render(frame: &mut Frame, app: &mut App) {
 fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn album_duration(tracks: &[Track]) -> Option<Duration> {
+    tracks
+        .iter()
+        .filter_map(|track| track.duration)
+        .reduce(|total, duration| total + duration)
 }
 
 fn format_bytes(bytes: u64) -> String {
