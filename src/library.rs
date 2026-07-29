@@ -5,6 +5,7 @@ use std::{
 };
 
 use lofty::{
+    config::WriteOptions,
     file::AudioFile,
     prelude::{Accessor, TaggedFileExt},
     read_from_path,
@@ -19,6 +20,7 @@ pub struct Track {
     pub artist: String,
     pub album_artist: String,
     pub album: String,
+    pub release_date: Option<String>,
     pub track_number: Option<u32>,
     pub duration: Option<Duration>,
     pub bytes: u64,
@@ -84,12 +86,44 @@ fn read_track(path: &Path) -> lofty::error::Result<Track> {
             .and_then(|tag| tag.album())
             .map(|value| value.into_owned())
             .unwrap_or_else(|| "Unknown album".into()),
+        release_date: tag
+            .and_then(|tag| {
+                tag.get_string(ItemKey::RecordingDate)
+                    .or_else(|| tag.get_string(ItemKey::Year))
+            })
+            .map(ToOwned::to_owned),
         track_number: tag.and_then(|tag| tag.track()),
         duration: Some(tagged_file.properties().duration()),
         bytes: fs::metadata(path)
             .map(|metadata| metadata.len())
             .unwrap_or(0),
     })
+}
+
+pub fn write_metadata(
+    path: &Path,
+    title: Option<&str>,
+    album: &str,
+    release_date: &str,
+) -> Result<(), String> {
+    let mut tagged_file = read_from_path(path).map_err(|error| error.to_string())?;
+    let tag = tagged_file
+        .primary_tag_mut()
+        .ok_or_else(|| "the file has no writable primary tag".to_owned())?;
+
+    if let Some(title) = title {
+        tag.set_title(title.to_owned());
+    }
+    tag.set_album(album.to_owned());
+    tag.remove_key(ItemKey::Year);
+    tag.remove_key(ItemKey::RecordingDate);
+    if !release_date.trim().is_empty() {
+        tag.insert_text(ItemKey::RecordingDate, release_date.trim().to_owned());
+    }
+
+    tagged_file
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|error| error.to_string())
 }
 
 pub fn main_artist_from_credit(artist: Option<&str>) -> String {
@@ -111,9 +145,44 @@ pub fn main_artist_from_credit(artist: Option<&str>) -> String {
     artist.to_owned()
 }
 
+pub fn is_valid_release_date(date: &str) -> bool {
+    let parts: Vec<_> = date.split('-').collect();
+    if !(1..=3).contains(&parts.len())
+        || parts[0].len() != 4
+        || (parts.len() >= 2 && parts[1].len() != 2)
+        || (parts.len() == 3 && parts[2].len() != 2)
+        || !parts
+            .iter()
+            .all(|part| part.chars().all(|character| character.is_ascii_digit()))
+    {
+        return false;
+    }
+    if parts.len() == 1 {
+        return true;
+    }
+
+    let Ok(month) = parts[1].parse::<u32>() else {
+        return false;
+    };
+    if !(1..=12).contains(&month) || (parts.len() == 2) {
+        return (1..=12).contains(&month);
+    }
+
+    let (Ok(year), Ok(day)) = (parts[0].parse::<u32>(), parts[2].parse::<u32>()) else {
+        return false;
+    };
+    let days_in_month = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 31,
+    };
+    (1..=days_in_month).contains(&day)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::main_artist_from_credit;
+    use super::{is_valid_release_date, main_artist_from_credit};
 
     #[test]
     fn extracts_primary_artist_from_common_feature_credits() {
@@ -129,5 +198,15 @@ mod tests {
     #[test]
     fn preserves_an_artist_without_feature_credit() {
         assert_eq!(main_artist_from_credit(Some("Nina Simone")), "Nina Simone");
+    }
+
+    #[test]
+    fn validates_supported_release_date_formats() {
+        for date in ["2005", "2005-02", "2005-02-28", "2004-02-29"] {
+            assert!(is_valid_release_date(date), "{date} should be valid");
+        }
+        for date in ["05", "2005-2", "2005-13", "2005-02-29", "2005/02/01"] {
+            assert!(!is_valid_release_date(date), "{date} should be invalid");
+        }
     }
 }

@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
 };
 
 use crate::library::{self, Track};
@@ -29,6 +29,39 @@ enum LibraryRow {
     Track { album: usize, track: usize },
 }
 
+#[derive(Clone, Copy)]
+enum EditorTarget {
+    Album(usize),
+    Track { album: usize, track: usize },
+}
+
+struct MetadataEditor {
+    target: EditorTarget,
+    values: Vec<String>,
+    active_field: usize,
+}
+
+impl MetadataEditor {
+    fn labels(&self) -> &[&str] {
+        match self.target {
+            EditorTarget::Album(_) => &["Album", "Release date"],
+            EditorTarget::Track { .. } => &["Title", "Album", "Release date"],
+        }
+    }
+
+    fn move_focus(&mut self, direction: isize) {
+        let field_count = self.values.len() as isize;
+        self.active_field =
+            (self.active_field as isize + direction).rem_euclid(field_count) as usize;
+    }
+
+    fn release_date(&self) -> &str {
+        self.values
+            .last()
+            .expect("every metadata editor has a release date field")
+    }
+}
+
 struct App {
     root: PathBuf,
     albums: Vec<Album>,
@@ -37,6 +70,8 @@ struct App {
     state: TableState,
     search: Option<String>,
     search_input: Option<String>,
+    editor: Option<MetadataEditor>,
+    status: Option<String>,
     started_at: Instant,
 }
 
@@ -55,6 +90,10 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 app.handle_search_key(key.code);
                 continue;
             }
+            if app.editor.is_some() {
+                app.handle_editor_key(key.code);
+                continue;
+            }
             if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 app.open_search();
                 continue;
@@ -67,6 +106,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     }
                 }
                 KeyCode::Char('r') => app.rescan(),
+                KeyCode::Char('e') => app.open_editor(),
                 KeyCode::Down | KeyCode::Char('j') => app.next(),
                 KeyCode::Up | KeyCode::Char('k') => app.previous(),
                 KeyCode::Enter | KeyCode::Char(' ') => app.toggle_selected_album(),
@@ -96,6 +136,8 @@ impl App {
             state,
             search: None,
             search_input: None,
+            editor: None,
+            status: None,
             started_at: Instant::now(),
         }
     }
@@ -106,6 +148,115 @@ impl App {
         self.expanded_albums.clear();
         self.unreadable = unreadable;
         self.state.select((!self.albums.is_empty()).then_some(0));
+    }
+
+    fn open_editor(&mut self) {
+        let Some(selected) = self.selected_row() else {
+            return;
+        };
+        let editor = match selected {
+            LibraryRow::Album(album_index) => {
+                let album = &self.albums[album_index];
+                MetadataEditor {
+                    target: EditorTarget::Album(album_index),
+                    values: vec![
+                        album.title.clone(),
+                        album
+                            .tracks
+                            .first()
+                            .and_then(|track| track.release_date.clone())
+                            .unwrap_or_default(),
+                    ],
+                    active_field: 0,
+                }
+            }
+            LibraryRow::Track {
+                album,
+                track: track_index,
+            } => {
+                let track = &self.albums[album].tracks[track_index];
+                MetadataEditor {
+                    target: EditorTarget::Track {
+                        album,
+                        track: track_index,
+                    },
+                    values: vec![
+                        track.title.clone(),
+                        track.album.clone(),
+                        track.release_date.clone().unwrap_or_default(),
+                    ],
+                    active_field: 0,
+                }
+            }
+        };
+        self.status = None;
+        self.editor = Some(editor);
+    }
+
+    fn handle_editor_key(&mut self, key: KeyCode) {
+        if key == KeyCode::Enter {
+            self.save_editor();
+            return;
+        }
+        let editor = self.editor.as_mut().expect("editor is active");
+        match key {
+            KeyCode::Char(character) => editor.values[editor.active_field].push(character),
+            KeyCode::Backspace => {
+                editor.values[editor.active_field].pop();
+            }
+            KeyCode::Tab | KeyCode::Down => editor.move_focus(1),
+            KeyCode::BackTab | KeyCode::Up => editor.move_focus(-1),
+            KeyCode::Esc => self.editor = None,
+            _ => {}
+        }
+    }
+
+    fn save_editor(&mut self) {
+        let editor = self.editor.take().expect("editor is active");
+        if !library::is_valid_release_date(editor.release_date()) {
+            self.editor = Some(editor);
+            return;
+        }
+        let result = match editor.target {
+            EditorTarget::Album(album) => {
+                let paths: Vec<_> = self.albums[album]
+                    .tracks
+                    .iter()
+                    .map(|track| track.path.clone())
+                    .collect();
+                let album_name = &editor.values[0];
+                let release_date = &editor.values[1];
+                let failures: Vec<_> = paths
+                    .iter()
+                    .filter_map(|path| {
+                        library::write_metadata(path, None, album_name, release_date).err()
+                    })
+                    .collect();
+                if failures.is_empty() {
+                    format!("Saved album metadata for {} tracks", paths.len())
+                } else {
+                    format!(
+                        "Saved with {} write error(s): {}",
+                        failures.len(),
+                        failures[0]
+                    )
+                }
+            }
+            EditorTarget::Track { album, track } => {
+                let path = self.albums[album].tracks[track].path.clone();
+                match library::write_metadata(
+                    &path,
+                    Some(&editor.values[0]),
+                    &editor.values[1],
+                    &editor.values[2],
+                ) {
+                    Ok(()) => "Saved track metadata".into(),
+                    Err(error) => format!("Could not save: {error}"),
+                }
+            }
+        };
+        self.rescan();
+        self.status = Some(result);
     }
 
     fn next(&mut self) {
@@ -301,7 +452,10 @@ fn render(frame: &mut Frame, app: &mut App) {
         header_area,
     );
 
-    let header = Row::new(["Title", "Artist", "Album", "Length", "Format", "Size"]).style(
+    let header = Row::new([
+        "Title", "Artist", "Album", "Year", "Length", "Format", "Size",
+    ])
+    .style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -318,6 +472,14 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(format!("{marker} {}", album.title)),
                 Cell::from(album.artist.clone()),
                 Cell::from(format!("{} tracks", album.tracks.len())),
+                Cell::from(
+                    album
+                        .tracks
+                        .first()
+                        .and_then(|track| track.release_date.as_deref())
+                        .map(format_release_year)
+                        .unwrap_or("—"),
+                ),
                 Cell::from(
                     album_duration(&album.tracks)
                         .map(format_duration)
@@ -349,6 +511,13 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(""),
                 Cell::from(
                     track
+                        .release_date
+                        .as_deref()
+                        .map(format_release_year)
+                        .unwrap_or("—"),
+                ),
+                Cell::from(
+                    track
                         .duration
                         .map(format_duration)
                         .unwrap_or_else(|| "—".into()),
@@ -371,6 +540,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             Constraint::Fill(3),
             Constraint::Fill(2),
             Constraint::Fill(2),
+            Constraint::Length(6),
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(9),
@@ -389,19 +559,76 @@ fn render(frame: &mut Frame, app: &mut App) {
         format!("Search albums/artists: {input}  · Enter apply · Esc cancel · empty Enter clears")
     } else if app.search.is_some() {
         "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · Esc clear filter · q quit".into()
+    } else if let Some(status) = &app.status {
+        format!("{status} · e edit · Ctrl-K search · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · r rescan · q quit"
+        "↑/k ↓/j select · Enter toggle · → expand · ← collapse · e edit · Ctrl-K search · r rescan · q quit"
             .into()
     };
     frame.render_widget(
         Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL)),
         footer_area,
     );
+
+    if let Some(editor) = &app.editor {
+        render_editor(frame, editor);
+    }
+}
+
+fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
+    let width = 70.min(frame.area().width.saturating_sub(4));
+    let height = 9.min(frame.area().height.saturating_sub(4));
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let date_is_valid = library::is_valid_release_date(editor.release_date());
+    let mut lines = vec![
+        Line::raw("Tab/↑/↓ switch field · Enter save · Esc cancel"),
+        Line::raw(""),
+    ];
+    for (index, (label, value)) in editor.labels().iter().zip(&editor.values).enumerate() {
+        let marker = if index == editor.active_field {
+            ">"
+        } else {
+            " "
+        };
+        let style = if *label == "Release date" && !date_is_valid {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::styled(format!("{marker} {label}: {value}"), style));
+    }
+    if !date_is_valid {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Invalid date — use YYYY, YYYY-MM, or YYYY-MM-DD. Enter is disabled.",
+            Style::default().fg(Color::Red),
+        ));
+    }
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Edit metadata "),
+        ),
+        popup,
+    );
 }
 
 fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn format_release_year(date: &str) -> &str {
+    date.get(..4)
+        .filter(|year| year.chars().all(|character| character.is_ascii_digit()))
+        .unwrap_or(date)
 }
 
 fn album_duration(tracks: &[Track]) -> Option<Duration> {
@@ -438,6 +665,7 @@ mod tests {
             artist: artist.into(),
             album_artist: album_artist.into(),
             album: album.into(),
+            release_date: Some("2005".into()),
             track_number: Some(track_number),
             duration: Some(Duration::from_secs(180)),
             bytes: 1,

@@ -2,6 +2,8 @@
 
 - [x] Read-only music-library scanner and terminal browser
 - [x] Organize code by library and browser features, with focused unit tests
+- [x] Edit track and album title/date metadata from the library browser
+- [x] Validate release-date input before saving metadata
 - [ ] UI refinement
   - [x] Group music by album, with expandable albums and drill-in navigation
   - [x] Group featured-artist tracks under the primary album artist
