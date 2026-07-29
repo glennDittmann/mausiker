@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeSet,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -41,6 +42,13 @@ struct MetadataEditor {
     active_field: usize,
 }
 
+struct Playback {
+    path: PathBuf,
+    title: String,
+    child: Child,
+    started_at: Instant,
+}
+
 impl MetadataEditor {
     fn labels(&self) -> &[&str] {
         match self.target {
@@ -72,12 +80,14 @@ struct App {
     search_input: Option<String>,
     editor: Option<MetadataEditor>,
     status: Option<String>,
+    playback: Option<Playback>,
     started_at: Instant,
 }
 
 pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
     let mut app = App::scan(root);
     loop {
+        app.refresh_playback();
         terminal.draw(|frame| render(frame, &mut app))?;
         if !event::poll(Duration::from_millis(200))? {
             continue;
@@ -99,9 +109,13 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 continue;
             }
             match key.code {
-                KeyCode::Char('q') => break Ok(()),
+                KeyCode::Char('q') => {
+                    app.stop_playback();
+                    break Ok(());
+                }
                 KeyCode::Esc => {
                     if !app.clear_search() {
+                        app.stop_playback();
                         break Ok(());
                     }
                 }
@@ -109,7 +123,8 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 KeyCode::Char('e') => app.open_editor(),
                 KeyCode::Down | KeyCode::Char('j') => app.next(),
                 KeyCode::Up | KeyCode::Char('k') => app.previous(),
-                KeyCode::Enter | KeyCode::Char(' ') => app.toggle_selected_album(),
+                KeyCode::Enter => app.toggle_selected_album(),
+                KeyCode::Char(' ') => app.toggle_playback_selected(),
                 KeyCode::Right | KeyCode::Char('l') => app.expand_selected_album(),
                 KeyCode::Left | KeyCode::Char('h') => app.collapse_selected_album(),
                 _ => {}
@@ -138,6 +153,7 @@ impl App {
             search_input: None,
             editor: None,
             status: None,
+            playback: None,
             started_at: Instant::now(),
         }
     }
@@ -267,6 +283,57 @@ impl App {
                     .selected()
                     .map_or(0, |index| (index + 1) % row_count),
             ));
+        }
+    }
+
+    fn refresh_playback(&mut self) {
+        let finished = self
+            .playback
+            .as_mut()
+            .is_some_and(|playback| playback.child.try_wait().ok().flatten().is_some());
+        if finished {
+            self.playback = None;
+            self.status = Some("Playback finished".into());
+        }
+    }
+
+    fn toggle_playback_selected(&mut self) {
+        let Some(LibraryRow::Track { album, track }) = self.selected_row() else {
+            self.status = Some("Select a track to play it".into());
+            return;
+        };
+        let track = &self.albums[album].tracks[track];
+        let path = track.path.clone();
+        let title = track.title.clone();
+        if self
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.path == path)
+        {
+            self.stop_playback();
+            self.status = Some("Playback stopped".into());
+            return;
+        }
+
+        self.stop_playback();
+        match start_playback(&path) {
+            Ok(child) => {
+                self.playback = Some(Playback {
+                    path,
+                    title,
+                    child,
+                    started_at: Instant::now(),
+                });
+                self.status = None;
+            }
+            Err(error) => self.status = Some(format!("Could not start playback: {error}")),
+        }
+    }
+
+    fn stop_playback(&mut self) {
+        if let Some(mut playback) = self.playback.take() {
+            let _ = playback.child.kill();
+            let _ = playback.child.wait();
         }
     }
 
@@ -425,7 +492,22 @@ fn render(frame: &mut Frame, app: &mut App) {
         format_bytes(total_bytes),
         app.unreadable
     );
-    let summary = if let Some(search) = &app.search {
+    let mut summary_spans = vec![Span::raw(summary)];
+    if let Some(playback) = &app.playback {
+        summary_spans.push(Span::raw("  "));
+        summary_spans.push(Span::styled(
+            " PLAYING ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+        summary_spans.push(Span::styled(
+            marquee(&playback.title, 24, playback.started_at.elapsed()),
+            Style::default().fg(Color::LightGreen),
+        ));
+    }
+    if let Some(search) = &app.search {
         let pulse_is_bright = (app.started_at.elapsed().as_millis() / 650).is_multiple_of(2);
         let badge_style = Style::default()
             .fg(Color::Black)
@@ -435,14 +517,13 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Color::LightYellow
             })
             .add_modifier(Modifier::BOLD);
-        Line::from(vec![
-            Span::raw(summary),
-            Span::raw("  "),
-            Span::styled(format!(" FILTER ACTIVE: {search} "), badge_style),
-        ])
-    } else {
-        Line::from(summary)
-    };
+        summary_spans.push(Span::raw("  "));
+        summary_spans.push(Span::styled(
+            format!(" FILTER ACTIVE: {search} "),
+            badge_style,
+        ));
+    }
+    let summary = Line::from(summary_spans);
     frame.render_widget(
         Paragraph::new(summary).block(
             Block::default()
@@ -460,10 +541,17 @@ fn render(frame: &mut Frame, app: &mut App) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     );
-    let rows = app.visible_rows().into_iter().map(|row| match row {
+    let visible_rows = app.visible_rows();
+    let playback = app
+        .playback
+        .as_ref()
+        .map(|playback| (playback.path.clone(), playback.started_at));
+    let albums = &app.albums;
+    let expanded_albums = &app.expanded_albums;
+    let rows = visible_rows.into_iter().map(|row| match row {
         LibraryRow::Album(album_index) => {
-            let album = &app.albums[album_index];
-            let marker = if app.expanded_albums.contains(&album_index) {
+            let album = &albums[album_index];
+            let marker = if expanded_albums.contains(&album_index) {
                 "▼"
             } else {
                 "▶"
@@ -497,10 +585,19 @@ fn render(frame: &mut Frame, app: &mut App) {
             )
         }
         LibraryRow::Track { album, track } => {
-            let track = &app.albums[album].tracks[track];
+            let track = &albums[album].tracks[track];
+            let playing_indicator = if let Some((playing_path, started_at)) = &playback {
+                if playing_path == &track.path {
+                    animated_wave(started_at.elapsed())
+                } else {
+                    "  "
+                }
+            } else {
+                "  "
+            };
             Row::new([
                 Cell::from(format!(
-                    "  └─ {}  {}",
+                    "{playing_indicator}└─ {}  {}",
                     track
                         .track_number
                         .map(|number| format!("{number:02}"))
@@ -560,9 +657,9 @@ fn render(frame: &mut Frame, app: &mut App) {
     } else if app.search.is_some() {
         "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · Esc clear filter · q quit".into()
     } else if let Some(status) = &app.status {
-        format!("{status} · e edit · Ctrl-K search · q quit")
+        format!("{status} · Space play/stop · e edit · Ctrl-K search · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · → expand · ← collapse · e edit · Ctrl-K search · r rescan · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · Ctrl-K search · r rescan · q quit"
             .into()
     };
     frame.render_widget(
@@ -618,6 +715,39 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
         ),
         popup,
     );
+}
+
+fn start_playback(path: &Path) -> io::Result<Child> {
+    Command::new("ffplay")
+        .args(["-nodisp", "-autoexit", "-loglevel", "error"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+fn animated_wave(elapsed: Duration) -> &'static str {
+    const FRAMES: [&str; 4] = ["▁▃▅", "▃▅▃", "▅▃▁", "▃▁▃"];
+    FRAMES[(elapsed.as_millis() / 160 % FRAMES.len() as u128) as usize]
+}
+
+fn marquee(text: &str, width: usize, elapsed: Duration) -> String {
+    let characters: Vec<_> = text.chars().collect();
+    let offset = (elapsed.as_millis() / 180 % (characters.len() + width) as u128) as isize
+        - characters.len() as isize;
+    (0..width)
+        .map(|column| {
+            let index = column as isize - offset;
+            characters.get(index as usize).copied().unwrap_or(' ')
+        })
+        .collect()
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.stop_playback();
+    }
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -719,5 +849,17 @@ mod tests {
         app.collapse_selected_album();
         assert!(app.expanded_albums.is_empty());
         assert_eq!(app.state.selected(), Some(0));
+    }
+
+    #[test]
+    fn marquee_has_a_fixed_width_and_moves_the_title() {
+        assert_eq!(
+            marquee("A long title", 8, Duration::ZERO).chars().count(),
+            8
+        );
+        assert_ne!(
+            marquee("A long title", 8, Duration::ZERO),
+            marquee("A long title", 8, Duration::from_millis(2_000))
+        );
     }
 }
