@@ -1,4 +1,5 @@
 mod browser;
+mod conversion;
 mod library;
 
 use std::{env, path::PathBuf};

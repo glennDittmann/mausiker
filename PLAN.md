@@ -14,7 +14,7 @@
   - [x] Make active search filters prominent with a subtle visual pulse
   - [x] Include featured track artists in album search results
   - [ ] Define and apply a cohesive color scheme
-- [ ] Safe conversion queue: separate output folder, metadata preservation, verification, and explicit original-file deletion
+- [x] Safe conversion queue: separate output folder, metadata preservation, verification, and explicit original-file deletion
 
 ## Future ideas
 

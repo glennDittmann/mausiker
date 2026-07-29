@@ -15,7 +15,10 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
 };
 
-use crate::library::{self, Track};
+use crate::{
+    conversion::{self, CompletedConversion},
+    library::{self, Track},
+};
 
 #[derive(Debug)]
 struct Album {
@@ -90,6 +93,9 @@ struct App {
     editor: Option<MetadataEditor>,
     status: Option<String>,
     playback: Option<Playback>,
+    conversion_queue: Vec<PathBuf>,
+    completed_conversions: Vec<CompletedConversion>,
+    delete_confirmation: bool,
     started_at: Instant,
 }
 
@@ -103,6 +109,10 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
         }
         if let event::Event::Key(key) = event::read()? {
             if !key.is_press() {
+                continue;
+            }
+            if app.delete_confirmation {
+                app.handle_delete_confirmation(key.code);
                 continue;
             }
             if app.search_input.is_some() {
@@ -130,6 +140,9 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 }
                 KeyCode::Char('r') => app.rescan(),
                 KeyCode::Char('f') => app.toggle_view(),
+                KeyCode::Char('c') => app.enqueue_selected(),
+                KeyCode::Char('C') => app.run_conversion_queue(),
+                KeyCode::Char('d') => app.request_delete_originals(),
                 KeyCode::Char('e') => app.open_editor(),
                 KeyCode::Down | KeyCode::Char('j') => app.next(),
                 KeyCode::Up | KeyCode::Char('k') => app.previous(),
@@ -167,6 +180,9 @@ impl App {
             editor: None,
             status: None,
             playback: None,
+            conversion_queue: Vec::new(),
+            completed_conversions: Vec::new(),
+            delete_confirmation: false,
             started_at: Instant::now(),
         }
     }
@@ -200,6 +216,118 @@ impl App {
             ViewMode::AlbumMetadata => "Album metadata view".into(),
             ViewMode::Folders => "Folder view".into(),
         });
+    }
+
+    fn enqueue_selected(&mut self) {
+        let Some(selected) = self.selected_row() else {
+            return;
+        };
+        let paths: Vec<_> = match selected {
+            LibraryRow::Album(album) => self.active_albums()[album]
+                .tracks
+                .iter()
+                .map(|track| track.path.clone())
+                .collect(),
+            LibraryRow::Track { album, track } => {
+                vec![self.active_albums()[album].tracks[track].path.clone()]
+            }
+        };
+        let mut queued = 0;
+        let mut skipped = 0;
+        for path in paths {
+            if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+            {
+                skipped += 1;
+            } else if !self.conversion_queue.contains(&path) {
+                self.conversion_queue.push(path);
+                queued += 1;
+            }
+        }
+        self.status = Some(if queued > 0 {
+            format!("Queued {queued} track(s) for M4A conversion")
+        } else if skipped > 0 {
+            "M4A files are already in the target format".into()
+        } else {
+            "Selected tracks are already queued".into()
+        });
+    }
+
+    fn run_conversion_queue(&mut self) {
+        if self.conversion_queue.is_empty() {
+            self.status = Some("Conversion queue is empty".into());
+            return;
+        }
+        let queued = std::mem::take(&mut self.conversion_queue);
+        let mut failures = Vec::new();
+        let mut converted = 0;
+        for source in queued {
+            match conversion::convert(&self.root, &source) {
+                Ok(completed) => {
+                    self.completed_conversions.push(completed);
+                    converted += 1;
+                }
+                Err(error) => {
+                    failures.push(source);
+                    self.status = Some(format!("Conversion error: {error}"));
+                }
+            }
+        }
+        self.conversion_queue = failures;
+        self.rescan();
+        self.status = Some(if self.conversion_queue.is_empty() {
+            format!("Converted and verified {converted} track(s); originals kept")
+        } else {
+            format!(
+                "Converted {converted}; {} track(s) remain queued",
+                self.conversion_queue.len()
+            )
+        });
+    }
+
+    fn request_delete_originals(&mut self) {
+        if self.completed_conversions.is_empty() {
+            self.status = Some("No verified conversions are available to delete".into());
+            return;
+        }
+        self.delete_confirmation = true;
+    }
+
+    fn handle_delete_confirmation(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let mut deleted = 0;
+                let mut retained = Vec::new();
+                for completed in std::mem::take(&mut self.completed_conversions) {
+                    if conversion::verify_output(&completed.output).is_ok() {
+                        match std::fs::remove_file(&completed.original) {
+                            Ok(()) => deleted += 1,
+                            Err(error) => {
+                                self.status = Some(format!(
+                                    "Could not delete {}: {error}",
+                                    completed.original.display()
+                                ));
+                                retained.push(completed);
+                            }
+                        }
+                    } else {
+                        retained.push(completed);
+                    }
+                }
+                self.completed_conversions = retained;
+                self.delete_confirmation = false;
+                self.rescan();
+                self.status = Some(format!(
+                    "Deleted {deleted} original track(s) after verification"
+                ));
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.delete_confirmation = false;
+                self.status = Some("Original files kept".into());
+            }
+            _ => {}
+        }
     }
 
     fn open_editor(&mut self) {
@@ -610,6 +738,16 @@ fn render(frame: &mut Frame, app: &mut App) {
             Style::default().fg(Color::LightGreen),
         ));
     }
+    if !app.conversion_queue.is_empty() {
+        summary_spans.push(Span::raw("  "));
+        summary_spans.push(Span::styled(
+            format!(" QUEUE: {} ", app.conversion_queue.len()),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(search) = &app.search {
         let pulse_is_bright = (app.started_at.elapsed().as_millis() / 650).is_multiple_of(2);
         let badge_style = Style::default()
@@ -779,9 +917,9 @@ fn render(frame: &mut Frame, app: &mut App) {
     } else if app.search.is_some() {
         "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · Esc clear filter · q quit".into()
     } else if let Some(status) = &app.status {
-        format!("{status} · Space play/stop · e edit · Ctrl-K search · q quit")
+        format!("{status} · c queue · C convert · d delete originals · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · f folders · Ctrl-K search · r rescan · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · c queue · C convert · d delete · f folders · Ctrl-K search · r rescan · q quit"
             .into()
     };
     frame.render_widget(
@@ -792,6 +930,28 @@ fn render(frame: &mut Frame, app: &mut App) {
     if let Some(editor) = &app.editor {
         render_editor(frame, editor);
     }
+    if app.delete_confirmation {
+        render_delete_confirmation(frame, app.completed_conversions.len());
+    }
+}
+
+fn render_delete_confirmation(frame: &mut Frame, count: usize) {
+    let width = 64.min(frame.area().width.saturating_sub(4));
+    let height = 7.min(frame.area().height.saturating_sub(4));
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Delete {count} original track(s)?\n\nEach converted M4A will be verified again first.\nThis cannot be undone.  y confirm · Esc keep originals"
+        ))
+        .block(Block::default().borders(Borders::ALL).title(" Delete originals? ")),
+        popup,
+    );
 }
 
 fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
