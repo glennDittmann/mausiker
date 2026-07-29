@@ -19,9 +19,16 @@ use crate::library::{self, Track};
 
 #[derive(Debug)]
 struct Album {
+    group: Option<String>,
     artist: String,
     title: String,
     tracks: Vec<Track>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    AlbumMetadata,
+    Folders,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +80,8 @@ impl MetadataEditor {
 struct App {
     root: PathBuf,
     albums: Vec<Album>,
+    folder_albums: Vec<Album>,
+    view_mode: ViewMode,
     expanded_albums: BTreeSet<usize>,
     unreadable: usize,
     state: TableState,
@@ -120,6 +129,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     }
                 }
                 KeyCode::Char('r') => app.rescan(),
+                KeyCode::Char('f') => app.toggle_view(),
                 KeyCode::Char('e') => app.open_editor(),
                 KeyCode::Down | KeyCode::Char('j') => app.next(),
                 KeyCode::Up | KeyCode::Char('k') => app.previous(),
@@ -140,12 +150,15 @@ impl App {
     }
 
     fn from_tracks(root: PathBuf, tracks: Vec<Track>, unreadable: usize) -> Self {
-        let albums = group_by_album(tracks);
+        let albums = group_by_album(tracks.clone());
+        let folder_albums = group_by_folder(root.as_path(), tracks);
         let mut state = TableState::default();
         state.select((!albums.is_empty()).then_some(0));
         Self {
             root,
             albums,
+            folder_albums,
+            view_mode: ViewMode::AlbumMetadata,
             expanded_albums: BTreeSet::new(),
             unreadable,
             state,
@@ -160,10 +173,33 @@ impl App {
 
     fn rescan(&mut self) {
         let (tracks, unreadable) = library::scan(&self.root);
-        self.albums = group_by_album(tracks);
+        self.albums = group_by_album(tracks.clone());
+        self.folder_albums = group_by_folder(self.root.as_path(), tracks);
         self.expanded_albums.clear();
         self.unreadable = unreadable;
-        self.state.select((!self.albums.is_empty()).then_some(0));
+        self.state
+            .select((!self.active_albums().is_empty()).then_some(0));
+    }
+
+    fn active_albums(&self) -> &[Album] {
+        match self.view_mode {
+            ViewMode::AlbumMetadata => &self.albums,
+            ViewMode::Folders => &self.folder_albums,
+        }
+    }
+
+    fn toggle_view(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::AlbumMetadata => ViewMode::Folders,
+            ViewMode::Folders => ViewMode::AlbumMetadata,
+        };
+        self.expanded_albums.clear();
+        self.state
+            .select((!self.active_albums().is_empty()).then_some(0));
+        self.status = Some(match self.view_mode {
+            ViewMode::AlbumMetadata => "Album metadata view".into(),
+            ViewMode::Folders => "Folder view".into(),
+        });
     }
 
     fn open_editor(&mut self) {
@@ -172,7 +208,7 @@ impl App {
         };
         let editor = match selected {
             LibraryRow::Album(album_index) => {
-                let album = &self.albums[album_index];
+                let album = &self.active_albums()[album_index];
                 MetadataEditor {
                     target: EditorTarget::Album(album_index),
                     values: vec![
@@ -190,7 +226,7 @@ impl App {
                 album,
                 track: track_index,
             } => {
-                let track = &self.albums[album].tracks[track_index];
+                let track = &self.active_albums()[album].tracks[track_index];
                 MetadataEditor {
                     target: EditorTarget::Track {
                         album,
@@ -235,7 +271,7 @@ impl App {
         }
         let result = match editor.target {
             EditorTarget::Album(album) => {
-                let paths: Vec<_> = self.albums[album]
+                let paths: Vec<_> = self.active_albums()[album]
                     .tracks
                     .iter()
                     .map(|track| track.path.clone())
@@ -259,7 +295,7 @@ impl App {
                 }
             }
             EditorTarget::Track { album, track } => {
-                let path = self.albums[album].tracks[track].path.clone();
+                let path = self.active_albums()[album].tracks[track].path.clone();
                 match library::write_metadata(
                     &path,
                     Some(&editor.values[0]),
@@ -302,7 +338,7 @@ impl App {
             self.status = Some("Select a track to play it".into());
             return;
         };
-        let track = &self.albums[album].tracks[track];
+        let track = &self.active_albums()[album].tracks[track];
         let path = track.path.clone();
         let title = track.title.clone();
         if self
@@ -348,7 +384,7 @@ impl App {
     }
 
     fn visible_rows(&self) -> Vec<LibraryRow> {
-        self.albums
+        self.active_albums()
             .iter()
             .enumerate()
             .filter(|(_, album)| self.album_matches_search(album))
@@ -371,6 +407,10 @@ impl App {
         };
         album.title.to_lowercase().contains(search)
             || album.artist.to_lowercase().contains(search)
+            || album
+                .group
+                .as_ref()
+                .is_some_and(|group| group.to_lowercase().contains(search))
             || album
                 .tracks
                 .iter()
@@ -454,13 +494,64 @@ fn group_by_album(tracks: Vec<Track>) -> Vec<Album> {
             album.tracks.push(track);
         } else {
             albums.push(Album {
+                group: None,
                 artist: track.album_artist.clone(),
                 title: track.album.clone(),
                 tracks: vec![track],
             });
         }
     }
-    for album in &mut albums {
+    sort_album_tracks(&mut albums);
+    albums
+}
+
+fn group_by_folder(root: &Path, tracks: Vec<Track>) -> Vec<Album> {
+    let mut albums: Vec<Album> = Vec::new();
+    for track in tracks {
+        let album_path = track.path.parent().unwrap_or(root);
+        let artist_path = album_path.parent().unwrap_or(root);
+        let group_path = artist_path.parent().unwrap_or(root);
+        let album_name = folder_name(album_path, "Unknown album folder");
+        let artist_name = folder_name(artist_path, "Unknown artist folder");
+        let group_name = group_path
+            .strip_prefix(root)
+            .ok()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.display().to_string());
+
+        if let Some(album) = albums.iter_mut().find(|album| {
+            album.group == group_name && album.artist == artist_name && album.title == album_name
+        }) {
+            album.tracks.push(track);
+        } else {
+            albums.push(Album {
+                group: group_name,
+                artist: artist_name,
+                title: album_name,
+                tracks: vec![track],
+            });
+        }
+    }
+    sort_album_tracks(&mut albums);
+    albums.sort_by(|left, right| {
+        left.group
+            .cmp(&right.group)
+            .then(left.artist.cmp(&right.artist))
+            .then(left.title.cmp(&right.title))
+    });
+    albums
+}
+
+fn folder_name(path: &Path, fallback: &str) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
+fn sort_album_tracks(albums: &mut [Album]) {
+    for album in albums {
         album.tracks.sort_by(|left, right| {
             left.track_number
                 .unwrap_or(u32::MAX)
@@ -468,7 +559,6 @@ fn group_by_album(tracks: Vec<Track>) -> Vec<Album> {
                 .then(left.title.cmp(&right.title))
         });
     }
-    albums
 }
 
 fn render(frame: &mut Frame, app: &mut App) {
@@ -478,16 +568,29 @@ fn render(frame: &mut Frame, app: &mut App) {
         Constraint::Length(3),
     ])
     .areas(frame.area());
-    let track_count: usize = app.albums.iter().map(|album| album.tracks.len()).sum();
-    let total_bytes: u64 = app
-        .albums
-        .iter()
-        .flat_map(|album| &album.tracks)
-        .map(|track| track.bytes)
-        .sum();
+    let view_mode = app.view_mode;
+    let (album_count, track_count, total_bytes) = {
+        let active_albums = app.active_albums();
+        (
+            active_albums.len(),
+            active_albums
+                .iter()
+                .map(|album| album.tracks.len())
+                .sum::<usize>(),
+            active_albums
+                .iter()
+                .flat_map(|album| &album.tracks)
+                .map(|track| track.bytes)
+                .sum::<u64>(),
+        )
+    };
     let summary = format!(
-        "{} albums · {} tracks · {} · {} unreadable",
-        app.albums.len(),
+        "{} {} · {} tracks · {} · {} unreadable",
+        album_count,
+        match view_mode {
+            ViewMode::AlbumMetadata => "albums",
+            ViewMode::Folders => "folder albums",
+        },
         track_count,
         format_bytes(total_bytes),
         app.unreadable
@@ -533,9 +636,20 @@ fn render(frame: &mut Frame, app: &mut App) {
         header_area,
     );
 
-    let header = Row::new([
-        "Title", "Artist", "Album", "Year", "Length", "Format", "Size",
-    ])
+    let header = Row::new(match view_mode {
+        ViewMode::AlbumMetadata => [
+            "Title", "Artist", "Album", "Year", "Length", "Format", "Size",
+        ],
+        ViewMode::Folders => [
+            "Album folder",
+            "Artist folder",
+            "Grouping folder",
+            "Year",
+            "Length",
+            "Format",
+            "Size",
+        ],
+    })
     .style(
         Style::default()
             .fg(Color::Cyan)
@@ -546,7 +660,10 @@ fn render(frame: &mut Frame, app: &mut App) {
         .playback
         .as_ref()
         .map(|playback| (playback.path.clone(), playback.started_at));
-    let albums = &app.albums;
+    let albums = match view_mode {
+        ViewMode::AlbumMetadata => &app.albums,
+        ViewMode::Folders => &app.folder_albums,
+    };
     let expanded_albums = &app.expanded_albums;
     let rows = visible_rows.into_iter().map(|row| match row {
         LibraryRow::Album(album_index) => {
@@ -559,7 +676,12 @@ fn render(frame: &mut Frame, app: &mut App) {
             Row::new([
                 Cell::from(format!("{marker} {}", album.title)),
                 Cell::from(album.artist.clone()),
-                Cell::from(format!("{} tracks", album.tracks.len())),
+                Cell::from(match view_mode {
+                    ViewMode::AlbumMetadata => format!("{} tracks", album.tracks.len()),
+                    ViewMode::Folders => {
+                        album.group.clone().unwrap_or_else(|| "Library root".into())
+                    }
+                }),
                 Cell::from(
                     album
                         .tracks
@@ -659,7 +781,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     } else if let Some(status) = &app.status {
         format!("{status} · Space play/stop · e edit · Ctrl-K search · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · Ctrl-K search · r rescan · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · f folders · Ctrl-K search · r rescan · q quit"
             .into()
     };
     frame.render_widget(
@@ -861,5 +983,22 @@ mod tests {
             marquee("A long title", 8, Duration::ZERO),
             marquee("A long title", 8, Duration::from_millis(2_000))
         );
+    }
+
+    #[test]
+    fn folder_view_derives_group_artist_and_album_from_paths() {
+        let mut first = track(
+            "First",
+            "Metadata artist",
+            "Metadata artist",
+            "Metadata album",
+            1,
+        );
+        first.path = PathBuf::from("/music/Rap/50 Cent/The Massacre/01.mp3");
+        let folders = group_by_folder(Path::new("/music"), vec![first]);
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].group.as_deref(), Some("Rap"));
+        assert_eq!(folders[0].artist, "50 Cent");
+        assert_eq!(folders[0].title, "The Massacre");
     }
 }
