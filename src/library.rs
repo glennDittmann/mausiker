@@ -27,12 +27,14 @@ pub struct Track {
 }
 
 pub fn scan(root: &Path) -> (Vec<Track>, usize) {
+    let exclusions = load_exclusions(root);
     let mut tracks = Vec::new();
     let mut unreadable = 0;
 
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| !is_excluded(entry.path(), &exclusions))
         .filter_map(Result::ok)
     {
         if !entry.file_type().is_file() || !is_supported_audio(entry.path()) {
@@ -51,6 +53,33 @@ pub fn scan(root: &Path) -> (Vec<Track>, usize) {
             .then(left.title.cmp(&right.title))
     });
     (tracks, unreadable)
+}
+
+pub fn exclusion_file(root: &Path) -> PathBuf {
+    root.join(".mausiker-exclude")
+}
+
+fn load_exclusions(root: &Path) -> Vec<PathBuf> {
+    let Ok(contents) = fs::read_to_string(exclusion_file(root)) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+        .collect()
+}
+
+fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
+    exclusions.iter().any(|excluded| path.starts_with(excluded))
 }
 
 fn is_supported_audio(path: &Path) -> bool {
@@ -182,7 +211,9 @@ pub fn is_valid_release_date(date: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_release_date, main_artist_from_credit};
+    use std::path::{Path, PathBuf};
+
+    use super::{is_excluded, is_valid_release_date, main_artist_from_credit};
 
     #[test]
     fn extracts_primary_artist_from_common_feature_credits() {
@@ -208,5 +239,20 @@ mod tests {
         for date in ["05", "2005-2", "2005-13", "2005-02-29", "2005/02/01"] {
             assert!(!is_valid_release_date(date), "{date} should be invalid");
         }
+    }
+
+    #[test]
+    fn recognizes_relative_and_absolute_excluded_folders() {
+        let root = Path::new("/music");
+        let exclusions = vec![root.join("Podcasts"), PathBuf::from("/archive")];
+        assert!(is_excluded(
+            Path::new("/music/Podcasts/episode.mp3"),
+            &exclusions
+        ));
+        assert!(is_excluded(Path::new("/archive/old.mp3"), &exclusions));
+        assert!(!is_excluded(
+            Path::new("/music/Albums/track.mp3"),
+            &exclusions
+        ));
     }
 }

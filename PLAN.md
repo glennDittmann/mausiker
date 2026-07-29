@@ -19,5 +19,5 @@
 ## Future ideas
 
 - [x] Preview the selected song with Space
-- [ ] Configure subfolders to exclude from library scans
+- [x] Configure subfolders to exclude from library scans
 - [ ] Add a folder view: treat a track's parent as its album folder, that folder's parent as its artist, and any higher folder as a music grouping
