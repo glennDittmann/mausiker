@@ -28,6 +28,11 @@ struct Album {
     tracks: Vec<Track>,
 }
 
+struct FolderGroup {
+    title: String,
+    albums: Vec<usize>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     AlbumMetadata,
@@ -37,6 +42,8 @@ enum ViewMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LibraryRow {
     Album(usize),
+    FolderGroup(usize),
+    FolderAlbum(usize),
     Track { album: usize, track: usize },
 }
 
@@ -84,8 +91,10 @@ struct App {
     root: PathBuf,
     albums: Vec<Album>,
     folder_albums: Vec<Album>,
+    folder_groups: Vec<FolderGroup>,
     view_mode: ViewMode,
     expanded_albums: BTreeSet<usize>,
+    expanded_folder_groups: BTreeSet<usize>,
     unreadable: usize,
     state: TableState,
     search: Option<String>,
@@ -139,7 +148,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     }
                 }
                 KeyCode::Char('r') => app.rescan(),
-                KeyCode::Char('f') => app.toggle_view(),
+                KeyCode::Char('v') => app.toggle_view(),
                 KeyCode::Char('c') => app.enqueue_selected(),
                 KeyCode::Char('C') => app.run_conversion_queue(),
                 KeyCode::Char('d') => app.request_delete_originals(),
@@ -165,14 +174,17 @@ impl App {
     fn from_tracks(root: PathBuf, tracks: Vec<Track>, unreadable: usize) -> Self {
         let albums = group_by_album(tracks.clone());
         let folder_albums = group_by_folder(root.as_path(), tracks);
+        let folder_groups = folder_groups(&folder_albums);
         let mut state = TableState::default();
         state.select((!albums.is_empty()).then_some(0));
         Self {
             root,
             albums,
             folder_albums,
+            folder_groups,
             view_mode: ViewMode::AlbumMetadata,
             expanded_albums: BTreeSet::new(),
+            expanded_folder_groups: BTreeSet::new(),
             unreadable,
             state,
             search: None,
@@ -191,7 +203,9 @@ impl App {
         let (tracks, unreadable) = library::scan(&self.root);
         self.albums = group_by_album(tracks.clone());
         self.folder_albums = group_by_folder(self.root.as_path(), tracks);
+        self.folder_groups = folder_groups(&self.folder_albums);
         self.expanded_albums.clear();
+        self.expanded_folder_groups.clear();
         self.unreadable = unreadable;
         self.state
             .select((!self.active_albums().is_empty()).then_some(0));
@@ -210,6 +224,7 @@ impl App {
             ViewMode::Folders => ViewMode::AlbumMetadata,
         };
         self.expanded_albums.clear();
+        self.expanded_folder_groups.clear();
         self.state
             .select((!self.active_albums().is_empty()).then_some(0));
         self.status = Some(match self.view_mode {
@@ -226,6 +241,17 @@ impl App {
             LibraryRow::Album(album) => self.active_albums()[album]
                 .tracks
                 .iter()
+                .map(|track| track.path.clone())
+                .collect(),
+            LibraryRow::FolderAlbum(album) => self.folder_albums[album]
+                .tracks
+                .iter()
+                .map(|track| track.path.clone())
+                .collect(),
+            LibraryRow::FolderGroup(group) => self.folder_groups[group]
+                .albums
+                .iter()
+                .flat_map(|album| self.folder_albums[*album].tracks.iter())
                 .map(|track| track.path.clone())
                 .collect(),
             LibraryRow::Track { album, track } => {
@@ -349,6 +375,26 @@ impl App {
                     ],
                     active_field: 0,
                 }
+            }
+            LibraryRow::FolderAlbum(album_index) => {
+                let album = &self.folder_albums[album_index];
+                MetadataEditor {
+                    target: EditorTarget::Album(album_index),
+                    values: vec![
+                        album.title.clone(),
+                        album
+                            .tracks
+                            .first()
+                            .and_then(|track| track.release_date.clone())
+                            .unwrap_or_default(),
+                    ],
+                    active_field: 0,
+                }
+            }
+            LibraryRow::FolderGroup(_) => {
+                self.status =
+                    Some("Expand a grouping folder and select an album or track to edit".into());
+                return;
             }
             LibraryRow::Track {
                 album,
@@ -512,21 +558,56 @@ impl App {
     }
 
     fn visible_rows(&self) -> Vec<LibraryRow> {
-        self.active_albums()
-            .iter()
-            .enumerate()
-            .filter(|(_, album)| self.album_matches_search(album))
-            .flat_map(|(album_index, album)| {
-                let mut rows = vec![LibraryRow::Album(album_index)];
-                if self.expanded_albums.contains(&album_index) {
-                    rows.extend((0..album.tracks.len()).map(|track| LibraryRow::Track {
-                        album: album_index,
-                        track,
-                    }));
-                }
-                rows
-            })
-            .collect()
+        match self.view_mode {
+            ViewMode::AlbumMetadata => self
+                .albums
+                .iter()
+                .enumerate()
+                .filter(|(_, album)| self.album_matches_search(album))
+                .flat_map(|(album_index, album)| {
+                    let mut rows = vec![LibraryRow::Album(album_index)];
+                    if self.expanded_albums.contains(&album_index) {
+                        rows.extend((0..album.tracks.len()).map(|track| LibraryRow::Track {
+                            album: album_index,
+                            track,
+                        }));
+                    }
+                    rows
+                })
+                .collect(),
+            ViewMode::Folders => self
+                .folder_groups
+                .iter()
+                .enumerate()
+                .filter(|(_, group)| {
+                    group
+                        .albums
+                        .iter()
+                        .any(|album| self.album_matches_search(&self.folder_albums[*album]))
+                })
+                .flat_map(|(group_index, group)| {
+                    let mut rows = vec![LibraryRow::FolderGroup(group_index)];
+                    if self.expanded_folder_groups.contains(&group_index) {
+                        for album_index in
+                            group.albums.iter().copied().filter(|album| {
+                                self.album_matches_search(&self.folder_albums[*album])
+                            })
+                        {
+                            rows.push(LibraryRow::FolderAlbum(album_index));
+                            if self.expanded_albums.contains(&album_index) {
+                                rows.extend((0..self.folder_albums[album_index].tracks.len()).map(
+                                    |track| LibraryRow::Track {
+                                        album: album_index,
+                                        track,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                    rows
+                })
+                .collect(),
+        }
     }
 
     fn album_matches_search(&self, album: &Album) -> bool {
@@ -577,28 +658,52 @@ impl App {
     }
 
     fn expand_selected_album(&mut self) {
-        if let Some(LibraryRow::Album(album)) = self.selected_row() {
-            self.expanded_albums.insert(album);
+        match self.selected_row() {
+            Some(LibraryRow::Album(album) | LibraryRow::FolderAlbum(album)) => {
+                self.expanded_albums.insert(album);
+            }
+            Some(LibraryRow::FolderGroup(group)) => {
+                self.expanded_folder_groups.insert(group);
+            }
+            _ => {}
         }
     }
 
     fn toggle_selected_album(&mut self) {
-        if let Some(LibraryRow::Album(album)) = self.selected_row() {
-            if !self.expanded_albums.remove(&album) {
-                self.expanded_albums.insert(album);
+        match self.selected_row() {
+            Some(LibraryRow::Album(album) | LibraryRow::FolderAlbum(album)) => {
+                if !self.expanded_albums.remove(&album) {
+                    self.expanded_albums.insert(album);
+                }
             }
+            Some(LibraryRow::FolderGroup(group)) => {
+                if !self.expanded_folder_groups.remove(&group) {
+                    self.expanded_folder_groups.insert(group);
+                }
+            }
+            _ => {}
         }
     }
 
     fn collapse_selected_album(&mut self) {
         let album = match self.selected_row() {
-            Some(LibraryRow::Album(album) | LibraryRow::Track { album, .. }) => album,
+            Some(
+                LibraryRow::Album(album)
+                | LibraryRow::FolderAlbum(album)
+                | LibraryRow::Track { album, .. },
+            ) => album,
+            Some(LibraryRow::FolderGroup(group)) => {
+                self.expanded_folder_groups.remove(&group);
+                return;
+            }
             None => return,
         };
         if let Some(album_row) = self
             .visible_rows()
             .iter()
-            .position(|row| matches!(row, LibraryRow::Album(index) if *index == album))
+            .position(|row| {
+                matches!(row, LibraryRow::Album(index) | LibraryRow::FolderAlbum(index) if *index == album)
+            })
         {
             self.expanded_albums.remove(&album);
             self.state.select(Some(album_row));
@@ -668,6 +773,22 @@ fn group_by_folder(root: &Path, tracks: Vec<Track>) -> Vec<Album> {
             .then(left.title.cmp(&right.title))
     });
     albums
+}
+
+fn folder_groups(albums: &[Album]) -> Vec<FolderGroup> {
+    let mut groups: Vec<FolderGroup> = Vec::new();
+    for (album_index, album) in albums.iter().enumerate() {
+        let title = album.group.clone().unwrap_or_else(|| "Library root".into());
+        if let Some(group) = groups.iter_mut().find(|group| group.title == title) {
+            group.albums.push(album_index);
+        } else {
+            groups.push(FolderGroup {
+                title,
+                albums: vec![album_index],
+            });
+        }
+    }
+    groups
 }
 
 fn folder_name(path: &Path, fallback: &str) -> String {
@@ -781,7 +902,7 @@ fn render(frame: &mut Frame, app: &mut App) {
         ViewMode::Folders => [
             "Album folder",
             "Artist folder",
-            "Grouping folder",
+            "Tracks",
             "Year",
             "Length",
             "Format",
@@ -802,9 +923,33 @@ fn render(frame: &mut Frame, app: &mut App) {
         ViewMode::AlbumMetadata => &app.albums,
         ViewMode::Folders => &app.folder_albums,
     };
+    let folder_groups = &app.folder_groups;
     let expanded_albums = &app.expanded_albums;
+    let expanded_folder_groups = &app.expanded_folder_groups;
     let rows = visible_rows.into_iter().map(|row| match row {
-        LibraryRow::Album(album_index) => {
+        LibraryRow::FolderGroup(group_index) => {
+            let group = &folder_groups[group_index];
+            let marker = if expanded_folder_groups.contains(&group_index) {
+                "▼"
+            } else {
+                "▶"
+            };
+            Row::new([
+                Cell::from(format!("{marker} {}", group.title)),
+                Cell::from(""),
+                Cell::from(format!("{} albums", group.albums.len())),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from("FOLDER"),
+                Cell::from(""),
+            ])
+            .style(
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        LibraryRow::Album(album_index) | LibraryRow::FolderAlbum(album_index) => {
             let album = &albums[album_index];
             let marker = if expanded_albums.contains(&album_index) {
                 "▼"
@@ -816,9 +961,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(album.artist.clone()),
                 Cell::from(match view_mode {
                     ViewMode::AlbumMetadata => format!("{} tracks", album.tracks.len()),
-                    ViewMode::Folders => {
-                        album.group.clone().unwrap_or_else(|| "Library root".into())
-                    }
+                    ViewMode::Folders => format!("{} tracks", album.tracks.len()),
                 }),
                 Cell::from(
                     album
@@ -919,7 +1062,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     } else if let Some(status) = &app.status {
         format!("{status} · c queue · C convert · d delete originals · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · c queue · C convert · d delete · f folders · Ctrl-K search · r rescan · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · c queue · C convert · d delete · v view · Ctrl-K search · r rescan · q quit"
             .into()
     };
     frame.render_widget(
@@ -1160,5 +1303,18 @@ mod tests {
         assert_eq!(folders[0].group.as_deref(), Some("Rap"));
         assert_eq!(folders[0].artist, "50 Cent");
         assert_eq!(folders[0].title, "The Massacre");
+    }
+
+    #[test]
+    fn folder_view_creates_separate_top_level_groups() {
+        let mut mine = track("First", "Artist", "Artist", "Album", 1);
+        mine.path = PathBuf::from("/music/me/Artist/Album/01.mp3");
+        let mut lucas = track("Second", "Artist", "Artist", "Album", 1);
+        lucas.path = PathBuf::from("/music/lucas/Artist/Album/01.mp3");
+        let albums = group_by_folder(Path::new("/music"), vec![mine, lucas]);
+        let groups = folder_groups(&albums);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title, "lucas");
+        assert_eq!(groups[1].title, "me");
     }
 }

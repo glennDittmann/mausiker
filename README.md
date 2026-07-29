@@ -13,7 +13,7 @@
   - Track edits update the title, album title, and release date for that track only.
   - Release dates are validated as `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` before saving.
 - Play a selected track with an animated playback indicator and scrolling now-playing title.
-- Switch to a filesystem-oriented folder view, deriving album, artist, and grouping from parent folders.
+- Switch to a filesystem-oriented folder view, expanding top-level grouping folders into their albums and tracks.
 - Exclude configured folders before scanning or reading metadata.
 - Queue MP3, FLAC, WAV, and other non-M4A tracks for verified AAC/M4A conversion in a separate output library.
 
@@ -26,7 +26,7 @@
 | `→` / `l`, `←` / `h` | Expand or collapse an album |
 | `Space` | Play or stop the selected track |
 | `e` | Edit selected album or track metadata |
-| `f` | Toggle metadata-album and filesystem-folder views |
+| `v` | Toggle metadata-album and filesystem-folder views |
 | `c` | Add the selected track or album to the M4A conversion queue |
 | `C` | Convert all queued tracks |
 | `d` | Request deletion of verified conversion originals; confirm with `y` or cancel with `Esc` |
