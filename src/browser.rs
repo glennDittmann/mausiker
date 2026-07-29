@@ -3,7 +3,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crossterm::event::{self, KeyCode, KeyModifiers};
@@ -37,6 +37,23 @@ struct FolderGroup {
 enum ViewMode {
     AlbumMetadata,
     Folders,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackFilter {
+    NoReleaseDate,
+    New,
+}
+
+impl TrackFilter {
+    const OPTIONS: [Option<Self>; 3] = [None, Some(Self::NoReleaseDate), Some(Self::New)];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NoReleaseDate => "No release date",
+            Self::New => "New (last 2 weeks)",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +122,8 @@ struct App {
     conversion_queue: Vec<PathBuf>,
     completed_conversions: Vec<CompletedConversion>,
     delete_confirmation: bool,
+    active_filter: Option<TrackFilter>,
+    filter_menu: Option<usize>,
     started_at: Instant,
 }
 
@@ -122,6 +141,10 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
             }
             if app.delete_confirmation {
                 app.handle_delete_confirmation(key.code);
+                continue;
+            }
+            if app.filter_menu.is_some() {
+                app.handle_filter_menu_key(key.code);
                 continue;
             }
             if app.search_input.is_some() {
@@ -149,6 +172,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 }
                 KeyCode::Char('r') => app.rescan(),
                 KeyCode::Char('v') => app.toggle_view(),
+                KeyCode::Char('f') => app.open_filter_menu(),
                 KeyCode::Char('c') => app.enqueue_selected(),
                 KeyCode::Char('C') => app.run_conversion_queue(),
                 KeyCode::Char('d') => app.request_delete_originals(),
@@ -195,6 +219,8 @@ impl App {
             conversion_queue: Vec::new(),
             completed_conversions: Vec::new(),
             delete_confirmation: false,
+            active_filter: None,
+            filter_menu: None,
             started_at: Instant::now(),
         }
     }
@@ -231,6 +257,45 @@ impl App {
             ViewMode::AlbumMetadata => "Album metadata view".into(),
             ViewMode::Folders => "Folder view".into(),
         });
+    }
+
+    fn open_filter_menu(&mut self) {
+        self.filter_menu = Some(
+            TrackFilter::OPTIONS
+                .iter()
+                .position(|filter| *filter == self.active_filter)
+                .unwrap_or(0),
+        );
+    }
+
+    fn handle_filter_menu_key(&mut self, key: KeyCode) {
+        let selected = self.filter_menu.as_mut().expect("filter menu is active");
+        match key {
+            KeyCode::Down | KeyCode::Char('j') => {
+                *selected = (*selected + 1) % TrackFilter::OPTIONS.len();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                *selected = if *selected == 0 {
+                    TrackFilter::OPTIONS.len() - 1
+                } else {
+                    *selected - 1
+                };
+            }
+            KeyCode::Enter => {
+                self.active_filter = TrackFilter::OPTIONS[*selected];
+                self.filter_menu = None;
+                self.expanded_albums.clear();
+                self.expanded_folder_groups.clear();
+                self.state
+                    .select((!self.visible_rows().is_empty()).then_some(0));
+                self.status = Some(match self.active_filter {
+                    Some(filter) => format!("Filter applied: {}", filter.label()),
+                    None => "Filter cleared".into(),
+                });
+            }
+            KeyCode::Esc => self.filter_menu = None,
+            _ => {}
+        }
     }
 
     fn enqueue_selected(&mut self) {
@@ -563,14 +628,18 @@ impl App {
                 .albums
                 .iter()
                 .enumerate()
-                .filter(|(_, album)| self.album_matches_search(album))
+                .filter(|(_, album)| self.album_matches(album))
                 .flat_map(|(album_index, album)| {
                     let mut rows = vec![LibraryRow::Album(album_index)];
                     if self.expanded_albums.contains(&album_index) {
-                        rows.extend((0..album.tracks.len()).map(|track| LibraryRow::Track {
-                            album: album_index,
-                            track,
-                        }));
+                        rows.extend(
+                            (0..album.tracks.len())
+                                .filter(|track| self.track_matches_filter(&album.tracks[*track]))
+                                .map(|track| LibraryRow::Track {
+                                    album: album_index,
+                                    track,
+                                }),
+                        );
                     }
                     rows
                 })
@@ -583,24 +652,31 @@ impl App {
                     group
                         .albums
                         .iter()
-                        .any(|album| self.album_matches_search(&self.folder_albums[*album]))
+                        .any(|album| self.album_matches(&self.folder_albums[*album]))
                 })
                 .flat_map(|(group_index, group)| {
                     let mut rows = vec![LibraryRow::FolderGroup(group_index)];
                     if self.expanded_folder_groups.contains(&group_index) {
-                        for album_index in
-                            group.albums.iter().copied().filter(|album| {
-                                self.album_matches_search(&self.folder_albums[*album])
-                            })
+                        for album_index in group
+                            .albums
+                            .iter()
+                            .copied()
+                            .filter(|album| self.album_matches(&self.folder_albums[*album]))
                         {
                             rows.push(LibraryRow::FolderAlbum(album_index));
                             if self.expanded_albums.contains(&album_index) {
-                                rows.extend((0..self.folder_albums[album_index].tracks.len()).map(
-                                    |track| LibraryRow::Track {
-                                        album: album_index,
-                                        track,
-                                    },
-                                ));
+                                rows.extend(
+                                    (0..self.folder_albums[album_index].tracks.len())
+                                        .filter(|track| {
+                                            self.track_matches_filter(
+                                                &self.folder_albums[album_index].tracks[*track],
+                                            )
+                                        })
+                                        .map(|track| LibraryRow::Track {
+                                            album: album_index,
+                                            track,
+                                        }),
+                                );
                             }
                         }
                     }
@@ -624,6 +700,22 @@ impl App {
                 .tracks
                 .iter()
                 .any(|track| track.artist.to_lowercase().contains(search))
+    }
+
+    fn album_matches(&self, album: &Album) -> bool {
+        self.album_matches_search(album)
+            && album
+                .tracks
+                .iter()
+                .any(|track| self.track_matches_filter(track))
+    }
+
+    fn track_matches_filter(&self, track: &Track) -> bool {
+        match self.active_filter {
+            None => true,
+            Some(TrackFilter::NoReleaseDate) => track.release_date.is_none(),
+            Some(TrackFilter::New) => track_is_new(track),
+        }
     }
 
     fn open_search(&mut self) {
@@ -810,6 +902,15 @@ fn sort_album_tracks(albums: &mut [Album]) {
     }
 }
 
+fn track_is_new(track: &Track) -> bool {
+    const TWO_WEEKS: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+    std::fs::metadata(&track.path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age <= TWO_WEEKS)
+}
+
 fn render(frame: &mut Frame, app: &mut App) {
     let [header_area, table_area, footer_area] = Layout::vertical([
         Constraint::Length(3),
@@ -883,6 +984,16 @@ fn render(frame: &mut Frame, app: &mut App) {
         summary_spans.push(Span::styled(
             format!(" FILTER ACTIVE: {search} "),
             badge_style,
+        ));
+    }
+    if let Some(filter) = app.active_filter {
+        summary_spans.push(Span::raw("  "));
+        summary_spans.push(Span::styled(
+            format!(" FILTER: {} ", filter.label()),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     let summary = Line::from(summary_spans);
@@ -1057,12 +1168,14 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     let footer_text = if let Some(input) = &app.search_input {
         format!("Search albums/artists: {input}  · Enter apply · Esc cancel · empty Enter clears")
+    } else if app.filter_menu.is_some() {
+        "Filter menu: ↑/↓ select · Enter apply · Esc cancel".into()
     } else if app.search.is_some() {
         "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · Esc clear filter · q quit".into()
     } else if let Some(status) = &app.status {
         format!("{status} · c queue · C convert · d delete originals · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · c queue · C convert · d delete · v view · Ctrl-K search · r rescan · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · f filter · c queue · C convert · d delete · v view · Ctrl-K search · r rescan · q quit"
             .into()
     };
     frame.render_widget(
@@ -1076,6 +1189,45 @@ fn render(frame: &mut Frame, app: &mut App) {
     if app.delete_confirmation {
         render_delete_confirmation(frame, app.completed_conversions.len());
     }
+    if let Some(selected) = app.filter_menu {
+        render_filter_menu(frame, selected);
+    }
+}
+
+fn render_filter_menu(frame: &mut Frame, selected: usize) {
+    let width = 42.min(frame.area().width.saturating_sub(4));
+    let height = 9.min(frame.area().height.saturating_sub(4));
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let mut lines = vec![Line::raw("Choose a track filter:"), Line::raw("")];
+    for (index, filter) in TrackFilter::OPTIONS.iter().enumerate() {
+        let label = filter.map(TrackFilter::label).unwrap_or("All tracks");
+        let style = if index == selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::styled(
+            format!(" {} {label}", if index == selected { ">" } else { " " }),
+            style,
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "New uses the file modification time from the last 14 days.",
+    ));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Filter ")),
+        popup,
+    );
 }
 
 fn render_delete_confirmation(frame: &mut Frame, count: usize) {
@@ -1316,5 +1468,29 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].title, "lucas");
         assert_eq!(groups[1].title, "me");
+    }
+
+    #[test]
+    fn no_release_date_filter_keeps_only_matching_tracks() {
+        let mut missing_date = track("Missing date", "Artist", "Artist", "Album", 1);
+        missing_date.release_date = None;
+        let app = App::from_tracks(
+            PathBuf::new(),
+            vec![
+                missing_date,
+                track("Has date", "Artist", "Artist", "Album", 2),
+            ],
+            0,
+        );
+        let mut app = app;
+        app.active_filter = Some(TrackFilter::NoReleaseDate);
+        app.expanded_albums.insert(0);
+        assert_eq!(
+            app.visible_rows(),
+            vec![
+                LibraryRow::Album(0),
+                LibraryRow::Track { album: 0, track: 0 }
+            ]
+        );
     }
 }

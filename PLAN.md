@@ -13,6 +13,7 @@
   - [x] Search albums and artists with Ctrl-K, with a reversible filter
   - [x] Make active search filters prominent with a subtle visual pulse
   - [x] Include featured track artists in album search results
+  - [x] Filter tracks by release-date completeness or recent file changes
   - [ ] Define and apply a cohesive color scheme
 - [x] Safe conversion queue: separate output folder, metadata preservation, verification, and explicit original-file deletion
 
