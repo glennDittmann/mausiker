@@ -86,8 +86,8 @@ struct Playback {
 impl MetadataEditor {
     fn labels(&self) -> &[&str] {
         match self.target {
-            EditorTarget::Album(_) => &["Album", "Release date"],
-            EditorTarget::Track { .. } => &["Title", "Album", "Release date"],
+            EditorTarget::Album(_) => &["Album artist", "Album", "Release date"],
+            EditorTarget::Track { .. } => &["Title", "Artist", "Album", "Release date"],
         }
     }
 
@@ -431,6 +431,7 @@ impl App {
                 MetadataEditor {
                     target: EditorTarget::Album(album_index),
                     values: vec![
+                        album.artist.clone(),
                         album.title.clone(),
                         album
                             .tracks
@@ -446,6 +447,7 @@ impl App {
                 MetadataEditor {
                     target: EditorTarget::Album(album_index),
                     values: vec![
+                        album.artist.clone(),
                         album.title.clone(),
                         album
                             .tracks
@@ -473,6 +475,7 @@ impl App {
                     },
                     values: vec![
                         track.title.clone(),
+                        track.artist.clone(),
                         track.album.clone(),
                         track.release_date.clone().unwrap_or_default(),
                     ],
@@ -515,12 +518,21 @@ impl App {
                     .iter()
                     .map(|track| track.path.clone())
                     .collect();
-                let album_name = &editor.values[0];
-                let release_date = &editor.values[1];
+                let album_artist = &editor.values[0];
+                let album_name = &editor.values[1];
+                let release_date = &editor.values[2];
                 let failures: Vec<_> = paths
                     .iter()
                     .filter_map(|path| {
-                        library::write_metadata(path, None, album_name, release_date).err()
+                        library::write_metadata(
+                            path,
+                            None,
+                            None,
+                            Some(album_artist),
+                            album_name,
+                            release_date,
+                        )
+                        .err()
                     })
                     .collect();
                 if failures.is_empty() {
@@ -538,8 +550,10 @@ impl App {
                 match library::write_metadata(
                     &path,
                     Some(&editor.values[0]),
-                    &editor.values[1],
+                    Some(&editor.values[1]),
+                    None,
                     &editor.values[2],
+                    &editor.values[3],
                 ) {
                     Ok(()) => "Saved track metadata".into(),
                     Err(error) => format!("Could not save: {error}"),
@@ -1491,6 +1505,28 @@ mod tests {
                 LibraryRow::Album(0),
                 LibraryRow::Track { album: 0, track: 0 }
             ]
+        );
+    }
+
+    #[test]
+    fn metadata_editor_separates_album_artist_from_track_artist() {
+        let album_editor = MetadataEditor {
+            target: EditorTarget::Album(0),
+            values: Vec::new(),
+            active_field: 0,
+        };
+        let track_editor = MetadataEditor {
+            target: EditorTarget::Track { album: 0, track: 0 },
+            values: Vec::new(),
+            active_field: 0,
+        };
+        assert_eq!(
+            album_editor.labels(),
+            ["Album artist", "Album", "Release date"]
+        );
+        assert_eq!(
+            track_editor.labels(),
+            ["Title", "Artist", "Album", "Release date"]
         );
     }
 }

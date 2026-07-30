@@ -132,6 +132,8 @@ fn read_track(path: &Path) -> lofty::error::Result<Track> {
 pub fn write_metadata(
     path: &Path,
     title: Option<&str>,
+    artist: Option<&str>,
+    album_artist: Option<&str>,
     album: &str,
     release_date: &str,
 ) -> Result<(), String> {
@@ -142,6 +144,12 @@ pub fn write_metadata(
 
     if let Some(title) = title {
         tag.set_title(title.to_owned());
+    }
+    if let Some(artist) = artist {
+        tag.set_artist(artist.to_owned());
+    }
+    if let Some(album_artist) = album_artist {
+        tag.insert_text(ItemKey::AlbumArtist, album_artist.to_owned());
     }
     tag.set_album(album.to_owned());
     tag.remove_key(ItemKey::Year);
