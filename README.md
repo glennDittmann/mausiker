@@ -12,6 +12,7 @@
   - Album edits update the album title and release date across all tracks in that album.
   - Track edits update the title, album title, and release date for that track only.
   - Release dates are validated as `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` before saving.
+  - Edit fields have a blinking cursor; use `←` and `→` to insert, backspace, or delete text in place.
 - Play a selected track with an animated playback indicator and scrolling now-playing title.
 - Switch to a filesystem-oriented folder view, expanding top-level grouping folders into their albums and tracks.
 - Exclude configured folders before scanning or reading metadata.

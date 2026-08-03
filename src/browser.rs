@@ -6,7 +6,11 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crossterm::event::{self, KeyCode, KeyModifiers};
+use crossterm::{
+    cursor::SetCursorStyle,
+    event::{self, KeyCode, KeyModifiers},
+    execute,
+};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
@@ -74,6 +78,7 @@ struct MetadataEditor {
     target: EditorTarget,
     values: Vec<String>,
     active_field: usize,
+    cursor_positions: Vec<usize>,
 }
 
 struct Playback {
@@ -95,6 +100,60 @@ impl MetadataEditor {
         let field_count = self.values.len() as isize;
         self.active_field =
             (self.active_field as isize + direction).rem_euclid(field_count) as usize;
+    }
+
+    fn insert(&mut self, character: char) {
+        let field = self.active_field;
+        let cursor = self.cursor_positions[field];
+        self.values[field].insert(cursor, character);
+        self.cursor_positions[field] += character.len_utf8();
+    }
+
+    fn move_cursor_left(&mut self) {
+        let field = self.active_field;
+        let value = &self.values[field];
+        self.cursor_positions[field] = value[..self.cursor_positions[field]]
+            .char_indices()
+            .last()
+            .map_or(0, |(index, _)| index);
+    }
+
+    fn move_cursor_right(&mut self) {
+        let field = self.active_field;
+        let value = &self.values[field];
+        let cursor = self.cursor_positions[field];
+        self.cursor_positions[field] = value[cursor..]
+            .chars()
+            .next()
+            .map_or(cursor, |character| cursor + character.len_utf8());
+    }
+
+    fn backspace(&mut self) {
+        let field = self.active_field;
+        let cursor = self.cursor_positions[field];
+        if cursor == 0 {
+            return;
+        }
+        let start = self.values[field][..cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .expect("a non-empty prefix has a previous character");
+        self.values[field].drain(start..cursor);
+        self.cursor_positions[field] = start;
+    }
+
+    fn delete(&mut self) {
+        let field = self.active_field;
+        let cursor = self.cursor_positions[field];
+        let Some(character) = self.values[field][cursor..].chars().next() else {
+            return;
+        };
+        self.values[field].drain(cursor..cursor + character.len_utf8());
+    }
+
+    fn cursor(&self) -> usize {
+        self.cursor_positions[self.active_field]
     }
 
     fn release_date(&self) -> &str {
@@ -129,64 +188,69 @@ struct App {
 
 pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
     let mut app = App::scan(root);
-    loop {
-        app.refresh_playback();
-        terminal.draw(|frame| render(frame, &mut app))?;
-        if !event::poll(Duration::from_millis(200))? {
-            continue;
-        }
-        if let event::Event::Key(key) = event::read()? {
-            if !key.is_press() {
+    execute!(io::stdout(), SetCursorStyle::BlinkingBar)?;
+    let result = (|| {
+        loop {
+            app.refresh_playback();
+            terminal.draw(|frame| render(frame, &mut app))?;
+            if !event::poll(Duration::from_millis(200))? {
                 continue;
             }
-            if app.delete_confirmation {
-                app.handle_delete_confirmation(key.code);
-                continue;
-            }
-            if app.filter_menu.is_some() {
-                app.handle_filter_menu_key(key.code);
-                continue;
-            }
-            if app.search_input.is_some() {
-                app.handle_search_key(key.code);
-                continue;
-            }
-            if app.editor.is_some() {
-                app.handle_editor_key(key.code);
-                continue;
-            }
-            if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.open_search();
-                continue;
-            }
-            match key.code {
-                KeyCode::Char('q') => {
-                    app.stop_playback();
-                    break Ok(());
+            if let event::Event::Key(key) = event::read()? {
+                if !key.is_press() {
+                    continue;
                 }
-                KeyCode::Esc => {
-                    if !app.clear_search() {
+                if app.delete_confirmation {
+                    app.handle_delete_confirmation(key.code);
+                    continue;
+                }
+                if app.filter_menu.is_some() {
+                    app.handle_filter_menu_key(key.code);
+                    continue;
+                }
+                if app.search_input.is_some() {
+                    app.handle_search_key(key.code);
+                    continue;
+                }
+                if app.editor.is_some() {
+                    app.handle_editor_key(key.code);
+                    continue;
+                }
+                if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    app.open_search();
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') => {
                         app.stop_playback();
                         break Ok(());
                     }
+                    KeyCode::Esc => {
+                        if !app.clear_search() {
+                            app.stop_playback();
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Char('r') => app.rescan(),
+                    KeyCode::Char('v') => app.toggle_view(),
+                    KeyCode::Char('f') => app.open_filter_menu(),
+                    KeyCode::Char('c') => app.enqueue_selected(),
+                    KeyCode::Char('C') => app.run_conversion_queue(),
+                    KeyCode::Char('d') => app.request_delete_originals(),
+                    KeyCode::Char('e') => app.open_editor(),
+                    KeyCode::Down | KeyCode::Char('j') => app.next(),
+                    KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                    KeyCode::Enter => app.toggle_selected_album(),
+                    KeyCode::Char(' ') => app.toggle_playback_selected(),
+                    KeyCode::Right | KeyCode::Char('l') => app.expand_selected_album(),
+                    KeyCode::Left | KeyCode::Char('h') => app.collapse_selected_album(),
+                    _ => {}
                 }
-                KeyCode::Char('r') => app.rescan(),
-                KeyCode::Char('v') => app.toggle_view(),
-                KeyCode::Char('f') => app.open_filter_menu(),
-                KeyCode::Char('c') => app.enqueue_selected(),
-                KeyCode::Char('C') => app.run_conversion_queue(),
-                KeyCode::Char('d') => app.request_delete_originals(),
-                KeyCode::Char('e') => app.open_editor(),
-                KeyCode::Down | KeyCode::Char('j') => app.next(),
-                KeyCode::Up | KeyCode::Char('k') => app.previous(),
-                KeyCode::Enter => app.toggle_selected_album(),
-                KeyCode::Char(' ') => app.toggle_playback_selected(),
-                KeyCode::Right | KeyCode::Char('l') => app.expand_selected_album(),
-                KeyCode::Left | KeyCode::Char('h') => app.collapse_selected_album(),
-                _ => {}
             }
         }
-    }
+    })();
+    let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
+    result
 }
 
 impl App {
@@ -440,6 +504,15 @@ impl App {
                             .unwrap_or_default(),
                     ],
                     active_field: 0,
+                    cursor_positions: vec![
+                        album.artist.len(),
+                        album.title.len(),
+                        album
+                            .tracks
+                            .first()
+                            .and_then(|track| track.release_date.as_ref())
+                            .map_or(0, String::len),
+                    ],
                 }
             }
             LibraryRow::FolderAlbum(album_index) => {
@@ -456,6 +529,15 @@ impl App {
                             .unwrap_or_default(),
                     ],
                     active_field: 0,
+                    cursor_positions: vec![
+                        album.artist.len(),
+                        album.title.len(),
+                        album
+                            .tracks
+                            .first()
+                            .and_then(|track| track.release_date.as_ref())
+                            .map_or(0, String::len),
+                    ],
                 }
             }
             LibraryRow::FolderGroup(_) => {
@@ -480,6 +562,12 @@ impl App {
                         track.release_date.clone().unwrap_or_default(),
                     ],
                     active_field: 0,
+                    cursor_positions: vec![
+                        track.title.len(),
+                        track.artist.len(),
+                        track.album.len(),
+                        track.release_date.as_ref().map_or(0, String::len),
+                    ],
                 }
             }
         };
@@ -494,10 +582,11 @@ impl App {
         }
         let editor = self.editor.as_mut().expect("editor is active");
         match key {
-            KeyCode::Char(character) => editor.values[editor.active_field].push(character),
-            KeyCode::Backspace => {
-                editor.values[editor.active_field].pop();
-            }
+            KeyCode::Char(character) => editor.insert(character),
+            KeyCode::Backspace => editor.backspace(),
+            KeyCode::Delete => editor.delete(),
+            KeyCode::Left => editor.move_cursor_left(),
+            KeyCode::Right => editor.move_cursor_right(),
             KeyCode::Tab | KeyCode::Down => editor.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => editor.move_focus(-1),
             KeyCode::Esc => self.editor = None,
@@ -1274,7 +1363,7 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
     };
     let date_is_valid = library::is_valid_release_date(editor.release_date());
     let mut lines = vec![
-        Line::raw("Tab/↑/↓ switch field · Enter save · Esc cancel"),
+        Line::raw("←/→ move cursor · Tab/↑/↓ switch field · Enter save · Esc cancel"),
         Line::raw(""),
     ];
     for (index, (label, value)) in editor.labels().iter().zip(&editor.values).enumerate() {
@@ -1306,6 +1395,15 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
         ),
         popup,
     );
+    let active_label = editor.labels()[editor.active_field];
+    let active_value = &editor.values[editor.active_field];
+    let cursor_prefix = format!("> {active_label}: {}", &active_value[..editor.cursor()]);
+    let cursor_column = Line::raw(cursor_prefix).width() as u16;
+    let cursor_x = popup.x + 1 + cursor_column;
+    let cursor_y = popup.y + 3 + editor.active_field as u16;
+    if cursor_x < popup.x + popup.width - 1 && cursor_y < popup.y + popup.height - 1 {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 fn start_playback(path: &Path) -> io::Result<Child> {
@@ -1514,11 +1612,13 @@ mod tests {
             target: EditorTarget::Album(0),
             values: Vec::new(),
             active_field: 0,
+            cursor_positions: Vec::new(),
         };
         let track_editor = MetadataEditor {
             target: EditorTarget::Track { album: 0, track: 0 },
             values: Vec::new(),
             active_field: 0,
+            cursor_positions: Vec::new(),
         };
         assert_eq!(
             album_editor.labels(),
@@ -1528,5 +1628,24 @@ mod tests {
             track_editor.labels(),
             ["Title", "Artist", "Album", "Release date"]
         );
+    }
+
+    #[test]
+    fn metadata_editor_edits_at_a_unicode_aware_cursor() {
+        let mut editor = MetadataEditor {
+            target: EditorTarget::Album(0),
+            values: vec!["Beyoncé".into()],
+            active_field: 0,
+            cursor_positions: vec!["Beyoncé".len()],
+        };
+
+        editor.move_cursor_left();
+        editor.move_cursor_left();
+        editor.insert('!');
+        editor.backspace();
+        editor.delete();
+
+        assert_eq!(editor.values[0], "Beyoné");
+        assert_eq!(editor.cursor(), "Beyon".len());
     }
 }
