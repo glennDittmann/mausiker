@@ -68,6 +68,12 @@ enum LibraryRow {
     Track { album: usize, track: usize },
 }
 
+enum BrowserSelection {
+    Album(PathBuf),
+    Group(String),
+    Track(PathBuf),
+}
+
 #[derive(Clone, Copy)]
 enum EditorTarget {
     Album(usize),
@@ -301,6 +307,101 @@ impl App {
             .select((!self.active_albums().is_empty()).then_some(0));
     }
 
+    fn rescan_preserving_browser_state(&mut self) {
+        let expanded_album_paths: BTreeSet<_> = self
+            .expanded_albums
+            .iter()
+            .filter_map(|&index| {
+                self.active_albums()
+                    .get(index)
+                    .and_then(|album| album.tracks.first())
+                    .map(|track| track.path.clone())
+            })
+            .collect();
+        let expanded_group_titles: BTreeSet<_> = self
+            .expanded_folder_groups
+            .iter()
+            .filter_map(|&index| {
+                self.folder_groups
+                    .get(index)
+                    .map(|group| group.title.clone())
+            })
+            .collect();
+        let selected = match self.selected_row() {
+            Some(LibraryRow::Album(index) | LibraryRow::FolderAlbum(index)) => self
+                .active_albums()
+                .get(index)
+                .and_then(|album| album.tracks.first())
+                .map(|track| BrowserSelection::Album(track.path.clone())),
+            Some(LibraryRow::FolderGroup(index)) => self
+                .folder_groups
+                .get(index)
+                .map(|group| BrowserSelection::Group(group.title.clone())),
+            Some(LibraryRow::Track { album, track }) => self
+                .active_albums()
+                .get(album)
+                .and_then(|album| album.tracks.get(track))
+                .map(|track| BrowserSelection::Track(track.path.clone())),
+            None => None,
+        };
+
+        let (tracks, unreadable) = library::scan(&self.root);
+        self.albums = group_by_album(tracks.clone());
+        self.folder_albums = group_by_folder(self.root.as_path(), tracks);
+        self.folder_groups = folder_groups(&self.folder_albums);
+        self.unreadable = unreadable;
+        self.expanded_albums = self
+            .active_albums()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, album)| {
+                album
+                    .tracks
+                    .first()
+                    .is_some_and(|track| expanded_album_paths.contains(&track.path))
+                    .then_some(index)
+            })
+            .collect();
+        self.expanded_folder_groups = match self.view_mode {
+            ViewMode::AlbumMetadata => BTreeSet::new(),
+            ViewMode::Folders => self
+                .folder_groups
+                .iter()
+                .enumerate()
+                .filter_map(|(index, group)| {
+                    expanded_group_titles
+                        .contains(&group.title)
+                        .then_some(index)
+                })
+                .collect(),
+        };
+        let selected_row = self
+            .visible_rows()
+            .iter()
+            .position(|row| match (row, &selected) {
+                (
+                    LibraryRow::Album(index) | LibraryRow::FolderAlbum(index),
+                    Some(BrowserSelection::Album(path)),
+                ) => self
+                    .active_albums()
+                    .get(*index)
+                    .and_then(|album| album.tracks.first())
+                    .is_some_and(|track| &track.path == path),
+                (LibraryRow::FolderGroup(index), Some(BrowserSelection::Group(title))) => self
+                    .folder_groups
+                    .get(*index)
+                    .is_some_and(|group| &group.title == title),
+                (LibraryRow::Track { album, track }, Some(BrowserSelection::Track(path))) => self
+                    .active_albums()
+                    .get(*album)
+                    .and_then(|album| album.tracks.get(*track))
+                    .is_some_and(|track| &track.path == path),
+                _ => false,
+            });
+        self.state
+            .select(selected_row.or_else(|| (!self.visible_rows().is_empty()).then_some(0)));
+    }
+
     fn active_albums(&self) -> &[Album] {
         match self.view_mode {
             ViewMode::AlbumMetadata => &self.albums,
@@ -348,8 +449,6 @@ impl App {
             KeyCode::Enter => {
                 self.active_filter = TrackFilter::OPTIONS[*selected];
                 self.filter_menu = None;
-                self.expanded_albums.clear();
-                self.expanded_folder_groups.clear();
                 self.state
                     .select((!self.visible_rows().is_empty()).then_some(0));
                 self.status = Some(match self.active_filter {
@@ -649,7 +748,7 @@ impl App {
                 }
             }
         };
-        self.rescan();
+        self.rescan_preserving_browser_state();
         self.status = Some(result);
     }
 
@@ -1647,5 +1746,22 @@ mod tests {
 
         assert_eq!(editor.values[0], "Beyoné");
         assert_eq!(editor.cursor(), "Beyon".len());
+    }
+
+    #[test]
+    fn applying_a_filter_keeps_expanded_items_open() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![track("Title", "Artist", "Artist", "Album", 1)],
+            0,
+        );
+        app.expanded_albums.insert(0);
+        app.expanded_folder_groups.insert(0);
+        app.filter_menu = Some(1);
+
+        app.handle_filter_menu_key(KeyCode::Enter);
+
+        assert!(app.expanded_albums.contains(&0));
+        assert!(app.expanded_folder_groups.contains(&0));
     }
 }
