@@ -2,6 +2,8 @@
 
 `mausiker` is a terminal music-library manager built with [Ratatui].
 
+![Filtered album view with song playback](assets/filtered_album_view_song_playing.png)
+
 ## Current capabilities
 
 - Recursively scan common audio files and read their metadata without changing them.
