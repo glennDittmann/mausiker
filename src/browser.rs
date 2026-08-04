@@ -3,6 +3,8 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -92,6 +94,18 @@ struct Playback {
     title: String,
     child: Child,
     started_at: Instant,
+}
+
+struct ConversionProgress {
+    total: usize,
+    processed: usize,
+    successful: usize,
+    unsuccessful: usize,
+}
+
+struct ConversionResult {
+    source: PathBuf,
+    result: Result<CompletedConversion, String>,
 }
 
 impl MetadataEditor {
@@ -186,6 +200,8 @@ struct App {
     status: Option<String>,
     playback: Option<Playback>,
     conversion_queue: Vec<PathBuf>,
+    conversion_progress: Option<ConversionProgress>,
+    conversion_receiver: Option<Receiver<ConversionResult>>,
     completed_conversions: Vec<CompletedConversion>,
     delete_confirmation: bool,
     active_filter: Option<TrackFilter>,
@@ -199,6 +215,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
     let result = (|| {
         loop {
             app.refresh_playback();
+            app.refresh_conversion();
             terminal.draw(|frame| render(frame, &mut app))?;
             if !event::poll(Duration::from_millis(200))? {
                 continue;
@@ -227,6 +244,9 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i')) {
                         app.path_inspector = None;
                     }
+                    continue;
+                }
+                if app.conversion_progress.is_some() {
                     continue;
                 }
                 if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -296,6 +316,8 @@ impl App {
             status: None,
             playback: None,
             conversion_queue: Vec::new(),
+            conversion_progress: None,
+            conversion_receiver: None,
             completed_conversions: Vec::new(),
             delete_confirmation: false,
             active_filter: None,
@@ -609,30 +631,79 @@ impl App {
             return;
         }
         let queued = std::mem::take(&mut self.conversion_queue);
-        let mut failures = Vec::new();
-        let mut converted = 0;
-        for source in queued {
-            match conversion::convert(&self.root, &source) {
-                Ok(completed) => {
-                    self.completed_conversions.push(completed);
-                    converted += 1;
+        let total = queued.len();
+        let root = self.root.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            for source in queued {
+                let result = conversion::convert(&root, &source);
+                if sender.send(ConversionResult { source, result }).is_err() {
+                    break;
                 }
-                Err(error) => {
-                    failures.push(source);
-                    self.status = Some(format!("Conversion error: {error}"));
+            }
+        });
+        self.conversion_progress = Some(ConversionProgress {
+            total,
+            processed: 0,
+            successful: 0,
+            unsuccessful: 0,
+        });
+        self.conversion_receiver = Some(receiver);
+        self.status = None;
+    }
+
+    fn refresh_conversion(&mut self) {
+        let Some(receiver) = &self.conversion_receiver else {
+            return;
+        };
+        let mut results = Vec::new();
+        let mut finished = false;
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => results.push(result),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
                 }
             }
         }
-        self.conversion_queue = failures;
-        self.rescan();
-        self.status = Some(if self.conversion_queue.is_empty() {
-            format!("Converted and verified {converted} track(s); originals kept")
-        } else {
-            format!(
-                "Converted {converted}; {} track(s) remain queued",
-                self.conversion_queue.len()
-            )
-        });
+        for result in results {
+            let progress = self
+                .conversion_progress
+                .as_mut()
+                .expect("conversion progress exists while receiving results");
+            progress.processed += 1;
+            match result.result {
+                Ok(completed) => {
+                    self.completed_conversions.push(completed);
+                    progress.successful += 1;
+                }
+                Err(_) => {
+                    self.conversion_queue.push(result.source);
+                    progress.unsuccessful += 1;
+                }
+            }
+        }
+        if finished {
+            let progress = self
+                .conversion_progress
+                .take()
+                .expect("conversion progress exists when worker finishes");
+            self.conversion_receiver = None;
+            self.rescan();
+            self.status = Some(if progress.unsuccessful == 0 {
+                format!(
+                    "Converted and verified {} track(s); originals kept",
+                    progress.successful
+                )
+            } else {
+                format!(
+                    "Converted {}; {} track(s) remain queued",
+                    progress.successful, progress.unsuccessful
+                )
+            });
+        }
     }
 
     fn request_delete_originals(&mut self) {
@@ -1498,6 +1569,9 @@ fn render(frame: &mut Frame, app: &mut App) {
     if let Some(paths) = &app.path_inspector {
         render_path_inspector(frame, paths);
     }
+    if let Some(progress) = &app.conversion_progress {
+        render_conversion_progress(frame, progress);
+    }
     if app.delete_confirmation {
         render_delete_confirmation(frame, app.completed_conversions.len());
     }
@@ -1682,6 +1756,44 @@ fn render_path_inspector(frame: &mut Frame, paths: &[PathBuf]) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" File paths ")),
+        popup,
+    );
+}
+
+fn render_conversion_progress(frame: &mut Frame, progress: &ConversionProgress) {
+    let width = 48.min(frame.area().width.saturating_sub(4));
+    let height = 9.min(frame.area().height.saturating_sub(4));
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let remaining = progress.total.saturating_sub(progress.processed);
+    let lines = vec![
+        Line::raw("Converting files — controls are temporarily disabled."),
+        Line::raw(""),
+        Line::raw(format!(
+            "Processed: {}/{}",
+            progress.processed, progress.total
+        )),
+        Line::styled(
+            format!("Successful: {}", progress.successful),
+            Style::default().fg(Color::Green),
+        ),
+        Line::styled(
+            format!("Unsuccessful: {}", progress.unsuccessful),
+            Style::default().fg(Color::Red),
+        ),
+        Line::raw(format!("Remaining: {remaining}")),
+    ];
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Conversion progress "),
+        ),
         popup,
     );
 }
@@ -1946,6 +2058,33 @@ mod tests {
         track.track_number = None;
 
         assert!(renamed_track_path(&track).is_err());
+    }
+
+    #[test]
+    fn conversion_progress_counts_successes_and_failures() {
+        let mut app = App::from_tracks(PathBuf::new(), Vec::new(), 0);
+        let (sender, receiver) = mpsc::channel();
+        app.conversion_progress = Some(ConversionProgress {
+            total: 2,
+            processed: 0,
+            successful: 0,
+            unsuccessful: 0,
+        });
+        app.conversion_receiver = Some(receiver);
+        sender
+            .send(ConversionResult {
+                source: PathBuf::from("failed.mp3"),
+                result: Err("conversion failed".into()),
+            })
+            .unwrap();
+
+        app.refresh_conversion();
+
+        let progress = app.conversion_progress.as_ref().unwrap();
+        assert_eq!(progress.processed, 1);
+        assert_eq!(progress.successful, 0);
+        assert_eq!(progress.unsuccessful, 1);
+        assert_eq!(app.conversion_queue, [PathBuf::from("failed.mp3")]);
     }
 
     #[test]

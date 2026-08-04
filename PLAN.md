@@ -22,3 +22,4 @@
 - [x] Add a folder view: treat a track's parent as its album folder, that folder's parent as its artist, and any higher folder as a music grouping
 - [x] Mark tracks selected for queue in UI
 - [x] Automatic renaming of tracks/albums to `NN_song_name`, using the track number and title
+- [x] Progress popup for music conversion
