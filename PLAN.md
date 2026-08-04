@@ -17,9 +17,8 @@
   - [x] Filter tracks by release-date completeness or recent file changes
   - [ ] Define and apply a cohesive color scheme
 - [x] Safe conversion queue: separate output folder, metadata preservation, verification, and explicit original-file deletion
-
-## Future ideas
-
 - [x] Preview the selected song with Space
 - [x] Configure subfolders to exclude from library scans
 - [x] Add a folder view: treat a track's parent as its album folder, that folder's parent as its artist, and any higher folder as a music grouping
+- [ ] mark titles selected for queue in UI
+- [ ] automatic renaming of track/albums: the patter is n_song_name, where n is the track number (removes the redundant information of artist and album, which is obvious from folder structure, can be seen in meta if needed)
