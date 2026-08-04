@@ -501,6 +501,27 @@ impl App {
         let Some(selected) = self.selected_row() else {
             return;
         };
+        if let LibraryRow::Track { album, track } = selected {
+            let path = self.active_albums()[album].tracks[track].path.clone();
+            if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+            {
+                self.status = Some("M4A files are already in the target format".into());
+            } else if let Some(index) = self
+                .conversion_queue
+                .iter()
+                .position(|queued| *queued == path)
+            {
+                self.conversion_queue.remove(index);
+                self.status = Some("Removed track from the conversion queue".into());
+            } else {
+                self.conversion_queue.push(path);
+                self.status = Some("Queued track for M4A conversion".into());
+            }
+            self.next();
+            return;
+        }
         let paths: Vec<_> = match selected {
             LibraryRow::Album(album) => self.active_albums()[album]
                 .tracks
@@ -518,9 +539,7 @@ impl App {
                 .flat_map(|album| self.folder_albums[*album].tracks.iter())
                 .map(|track| track.path.clone())
                 .collect(),
-            LibraryRow::Track { album, track } => {
-                vec![self.active_albums()[album].tracks[track].path.clone()]
-            }
+            LibraryRow::Track { .. } => unreachable!("track rows are handled above"),
         };
         let mut queued = 0;
         let mut skipped = 0;
@@ -540,7 +559,7 @@ impl App {
         } else if skipped > 0 {
             "M4A files are already in the target format".into()
         } else {
-            "Selected tracks are already queued".into()
+            "All selected album tracks are already queued".into()
         });
     }
 
@@ -2135,6 +2154,56 @@ mod tests {
         assert_eq!(progress.successful, 0);
         assert_eq!(progress.unsuccessful, 1);
         assert_eq!(app.conversion_queue, [PathBuf::from("failed.mp3")]);
+    }
+
+    #[test]
+    fn queue_key_toggles_a_track_and_advances_to_the_next_row() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![
+                track("First", "Artist", "Artist", "Album", 1),
+                track("Second", "Artist", "Artist", "Album", 2),
+            ],
+            0,
+        );
+        app.expanded_albums.insert(0);
+        app.state.select(Some(1));
+
+        app.enqueue_selected();
+
+        assert_eq!(app.conversion_queue, [PathBuf::from("1.mp3")]);
+        assert_eq!(
+            app.selected_row(),
+            Some(LibraryRow::Track { album: 0, track: 1 })
+        );
+
+        app.state.select(Some(1));
+        app.enqueue_selected();
+
+        assert!(app.conversion_queue.is_empty());
+        assert_eq!(
+            app.selected_row(),
+            Some(LibraryRow::Track { album: 0, track: 1 })
+        );
+    }
+
+    #[test]
+    fn queue_key_on_an_album_adds_all_eligible_tracks() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![
+                track("First", "Artist", "Artist", "Album", 1),
+                track("Second", "Artist", "Artist", "Album", 2),
+            ],
+            0,
+        );
+
+        app.enqueue_selected();
+
+        assert_eq!(
+            app.conversion_queue,
+            [PathBuf::from("1.mp3"), PathBuf::from("2.mp3")]
+        );
     }
 
     #[test]

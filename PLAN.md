@@ -23,3 +23,4 @@
 - [x] Mark tracks selected for queue in UI
 - [x] Automatic renaming of tracks/albums to `NN_song_name`, using the track number and title
 - [x] Progress popup for music conversion
+- [ ] c should toggle if already selected and jump to next song, so one can just keep pressing c to mark more songs, c on album de-/selects all tracks in it
