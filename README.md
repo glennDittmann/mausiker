@@ -13,6 +13,8 @@
   - Track edits update the title, album title, and release date for that track only.
   - Release dates are validated as `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` before saving.
   - Edit fields have a blinking cursor; use `←` and `→` to insert, backspace, or delete text in place.
+- Rename a selected track or all tracks in a selected album to `NN_Title.ext`, preserving their audio-file extension.
+- Inspect the full file path for a selected track or album before renaming.
 - Play a selected track with an animated playback indicator and scrolling now-playing title.
 - Switch to a filesystem-oriented folder view, expanding top-level grouping folders into their albums and tracks.
 - Exclude configured folders before scanning or reading metadata.
@@ -27,13 +29,14 @@
 | `→` / `l`, `←` / `h` | Expand or collapse an album |
 | `Space` | Play or stop the selected track |
 | `e` | Edit selected album or track metadata |
+| `i` | Show full file path(s) for the selected album or track |
+| `r` | Rename selected track or album tracks to `NN_Title.ext` |
 | `v` | Toggle metadata-album and filesystem-folder views |
 | `c` | Add the selected track or album to the M4A conversion queue |
 | `C` | Convert all queued tracks |
 | `d` | Request deletion of verified conversion originals; confirm with `y` or cancel with `Esc` |
 | `Ctrl-K` | Search albums and artists |
 | `Esc` | Cancel an edit/search, clear an active filter, or quit |
-| `r` | Rescan the library |
 | `q` | Quit |
 
 ## Playback requirement

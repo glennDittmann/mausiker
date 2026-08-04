@@ -21,4 +21,4 @@
 - [x] Configure subfolders to exclude from library scans
 - [x] Add a folder view: treat a track's parent as its album folder, that folder's parent as its artist, and any higher folder as a music grouping
 - [x] Mark tracks selected for queue in UI
-- [ ] automatic renaming of track/albums: the patter is n_song_name, where n is the track number (removes the redundant information of artist and album, which is obvious from folder structure, can be seen in meta if needed)
+- [x] Automatic renaming of tracks/albums to `NN_song_name`, using the track number and title

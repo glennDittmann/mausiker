@@ -182,6 +182,7 @@ struct App {
     search: Option<String>,
     search_input: Option<String>,
     editor: Option<MetadataEditor>,
+    path_inspector: Option<Vec<PathBuf>>,
     status: Option<String>,
     playback: Option<Playback>,
     conversion_queue: Vec<PathBuf>,
@@ -222,6 +223,12 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     app.handle_editor_key(key.code);
                     continue;
                 }
+                if app.path_inspector.is_some() {
+                    if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i')) {
+                        app.path_inspector = None;
+                    }
+                    continue;
+                }
                 if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     app.open_search();
                     continue;
@@ -237,7 +244,8 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                             break Ok(());
                         }
                     }
-                    KeyCode::Char('r') => app.rescan(),
+                    KeyCode::Char('r') => app.rename_selected(),
+                    KeyCode::Char('i') => app.open_path_inspector(),
                     KeyCode::Char('v') => app.toggle_view(),
                     KeyCode::Char('f') => app.open_filter_menu(),
                     KeyCode::Char('c') => app.enqueue_selected(),
@@ -284,6 +292,7 @@ impl App {
             search: None,
             search_input: None,
             editor: None,
+            path_inspector: None,
             status: None,
             playback: None,
             conversion_queue: Vec::new(),
@@ -505,6 +514,92 @@ impl App {
             "M4A files are already in the target format".into()
         } else {
             "Selected tracks are already queued".into()
+        });
+    }
+
+    fn selected_tracks(&self) -> Option<Vec<Track>> {
+        match self.selected_row()? {
+            LibraryRow::Album(album) => Some(self.active_albums()[album].tracks.clone()),
+            LibraryRow::FolderAlbum(album) => Some(self.folder_albums[album].tracks.clone()),
+            LibraryRow::Track { album, track } => {
+                Some(vec![self.active_albums()[album].tracks[track].clone()])
+            }
+            LibraryRow::FolderGroup(_) => None,
+        }
+    }
+
+    fn open_path_inspector(&mut self) {
+        let Some(tracks) = self.selected_tracks() else {
+            self.status = Some("Select an album or track to inspect its file path".into());
+            return;
+        };
+        self.path_inspector = Some(tracks.into_iter().map(|track| track.path).collect());
+    }
+
+    fn rename_selected(&mut self) {
+        let Some(tracks) = self.selected_tracks() else {
+            self.status = Some("Select an album or track to rename its file(s)".into());
+            return;
+        };
+        let mut renamed = 0;
+        let mut skipped = 0;
+        let mut renamed_paths = Vec::new();
+        for track in tracks {
+            let Ok(target) = renamed_track_path(&track) else {
+                skipped += 1;
+                continue;
+            };
+            if target == track.path {
+                continue;
+            }
+            if target.exists() {
+                skipped += 1;
+                continue;
+            }
+            match std::fs::rename(&track.path, &target) {
+                Ok(()) => {
+                    renamed_paths.push((track.path, target));
+                    renamed += 1;
+                }
+                Err(_) => skipped += 1,
+            }
+        }
+        for (source, target) in &renamed_paths {
+            for album in &mut self.albums {
+                for track in &mut album.tracks {
+                    if track.path == *source {
+                        track.path = target.clone();
+                    }
+                }
+            }
+            for album in &mut self.folder_albums {
+                for track in &mut album.tracks {
+                    if track.path == *source {
+                        track.path = target.clone();
+                    }
+                }
+            }
+            for path in &mut self.conversion_queue {
+                if path == source {
+                    *path = target.clone();
+                }
+            }
+            for completed in &mut self.completed_conversions {
+                if completed.original == *source {
+                    completed.original = target.clone();
+                }
+            }
+            if let Some(playback) = &mut self.playback
+                && playback.path == *source
+            {
+                playback.path = target.clone();
+            }
+        }
+        self.rescan_preserving_browser_state();
+        self.status = Some(match (renamed, skipped) {
+            (0, 0) => "File names already match the track numbers and titles".into(),
+            (renamed, 0) => format!("Renamed {renamed} track(s)"),
+            (renamed, skipped) => format!("Renamed {renamed} track(s); skipped {skipped}"),
         });
     }
 
@@ -1389,7 +1484,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     } else if let Some(status) = &app.status {
         format!("{status} · c queue · C convert · d delete originals · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · f filter · c queue · C convert · d delete · v view · Ctrl-K search · r rescan · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · i path · r rename · f filter · c queue · C convert · d delete · v view · Ctrl-K search · q quit"
             .into()
     };
     frame.render_widget(
@@ -1399,6 +1494,9 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     if let Some(editor) = &app.editor {
         render_editor(frame, editor);
+    }
+    if let Some(paths) = &app.path_inspector {
+        render_path_inspector(frame, paths);
     }
     if app.delete_confirmation {
         render_delete_confirmation(frame, app.completed_conversions.len());
@@ -1515,6 +1613,77 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
     if cursor_x < popup.x + popup.width - 1 && cursor_y < popup.y + popup.height - 1 {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn renamed_track_path(track: &Track) -> Result<PathBuf, ()> {
+    let number = track.track_number.ok_or(())?;
+    let title = sanitized_file_stem(&track.title);
+    let extension = track
+        .path
+        .extension()
+        .and_then(|extension| extension.to_str());
+    let filename = match extension {
+        Some(extension) if !extension.is_empty() => format!("{number:02}_{title}.{extension}"),
+        _ => format!("{number:02}_{title}"),
+    };
+    Ok(track.path.with_file_name(filename))
+}
+
+fn sanitized_file_stem(title: &str) -> String {
+    let mut filename = String::new();
+    for character in title.trim().trim_matches('.').chars() {
+        let separator = matches!(
+            character,
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'
+        ) || character.is_whitespace();
+        if separator {
+            if !filename.ends_with('_') {
+                filename.push('_');
+            }
+        } else {
+            filename.push(character);
+        }
+    }
+    (!filename.is_empty())
+        .then_some(filename)
+        .unwrap_or("Untitled".into())
+}
+
+fn render_path_inspector(frame: &mut Frame, paths: &[PathBuf]) {
+    let width = 100.min(frame.area().width.saturating_sub(4));
+    let requested_height = paths.len() as u16 + 4;
+    let height = requested_height
+        .min(frame.area().height.saturating_sub(4))
+        .max(5);
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let visible_paths = if requested_height > height {
+        paths.len().min(height.saturating_sub(5) as usize)
+    } else {
+        paths.len()
+    };
+    let mut lines: Vec<_> = paths
+        .iter()
+        .take(visible_paths)
+        .map(|path| Line::raw(path.display().to_string()))
+        .collect();
+    if visible_paths < paths.len() {
+        lines.push(Line::raw(format!(
+            "… and {} more",
+            paths.len() - visible_paths
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw("Esc, Enter, or i to close"));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" File paths ")),
+        popup,
+    );
 }
 
 fn start_playback(path: &Path) -> io::Result<Child> {
@@ -1758,6 +1927,25 @@ mod tests {
 
         assert_eq!(editor.values[0], "Beyoné");
         assert_eq!(editor.cursor(), "Beyon".len());
+    }
+
+    #[test]
+    fn renamed_track_path_uses_number_title_and_original_extension() {
+        let mut track = track("A / B? C", "Artist", "Artist", "Album", 3);
+        track.path = PathBuf::from("/music/old-name.FLAC");
+
+        assert_eq!(
+            renamed_track_path(&track).unwrap(),
+            PathBuf::from("/music/03_A_B_C.FLAC")
+        );
+    }
+
+    #[test]
+    fn renamed_track_path_requires_a_track_number() {
+        let mut track = track("Title", "Artist", "Artist", "Album", 1);
+        track.track_number = None;
+
+        assert!(renamed_track_path(&track).is_err());
     }
 
     #[test]
