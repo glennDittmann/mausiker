@@ -1239,6 +1239,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     let folder_groups = &app.folder_groups;
     let expanded_albums = &app.expanded_albums;
     let expanded_folder_groups = &app.expanded_folder_groups;
+    let queued_paths = &app.conversion_queue;
     let rows = visible_rows.into_iter().map(|row| match row {
         LibraryRow::FolderGroup(group_index) => {
             let group = &folder_groups[group_index];
@@ -1302,6 +1303,8 @@ fn render(frame: &mut Frame, app: &mut App) {
         }
         LibraryRow::Track { album, track } => {
             let track = &albums[album].tracks[track];
+            let is_queued = queued_paths.contains(&track.path);
+            let queue_indicator = if is_queued { "[Q] " } else { "    " };
             let playing_indicator = if let Some((playing_path, started_at)) = &playback {
                 if playing_path == &track.path {
                     animated_wave(started_at.elapsed())
@@ -1313,13 +1316,22 @@ fn render(frame: &mut Frame, app: &mut App) {
             };
             Row::new([
                 Cell::from(format!(
-                    "{playing_indicator}└─ {}  {}",
+                    "{playing_indicator}└─ {queue_indicator}{}  {}",
                     track
                         .track_number
                         .map(|number| format!("{number:02}"))
                         .unwrap_or_else(|| "--".into()),
                     track.title
-                )),
+                ))
+                .style(
+                    is_queued
+                        .then(|| {
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        })
+                        .unwrap_or_default(),
+                ),
                 Cell::from(track.artist.clone()),
                 Cell::from(""),
                 Cell::from(
