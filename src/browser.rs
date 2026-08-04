@@ -101,11 +101,16 @@ struct ConversionProgress {
     processed: usize,
     successful: usize,
     unsuccessful: usize,
+    current_path: Option<PathBuf>,
+    started_at: Instant,
 }
 
-struct ConversionResult {
-    source: PathBuf,
-    result: Result<CompletedConversion, String>,
+enum ConversionUpdate {
+    Started(PathBuf),
+    Finished {
+        source: PathBuf,
+        result: Result<CompletedConversion, String>,
+    },
 }
 
 impl MetadataEditor {
@@ -201,7 +206,7 @@ struct App {
     playback: Option<Playback>,
     conversion_queue: Vec<PathBuf>,
     conversion_progress: Option<ConversionProgress>,
-    conversion_receiver: Option<Receiver<ConversionResult>>,
+    conversion_receiver: Option<Receiver<ConversionUpdate>>,
     completed_conversions: Vec<CompletedConversion>,
     delete_confirmation: bool,
     active_filter: Option<TrackFilter>,
@@ -636,8 +641,17 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             for source in queued {
+                if sender
+                    .send(ConversionUpdate::Started(source.clone()))
+                    .is_err()
+                {
+                    break;
+                }
                 let result = conversion::convert(&root, &source);
-                if sender.send(ConversionResult { source, result }).is_err() {
+                if sender
+                    .send(ConversionUpdate::Finished { source, result })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -647,6 +661,8 @@ impl App {
             processed: 0,
             successful: 0,
             unsuccessful: 0,
+            current_path: None,
+            started_at: Instant::now(),
         });
         self.conversion_receiver = Some(receiver);
         self.status = None;
@@ -673,15 +689,21 @@ impl App {
                 .conversion_progress
                 .as_mut()
                 .expect("conversion progress exists while receiving results");
-            progress.processed += 1;
-            match result.result {
-                Ok(completed) => {
-                    self.completed_conversions.push(completed);
-                    progress.successful += 1;
-                }
-                Err(_) => {
-                    self.conversion_queue.push(result.source);
-                    progress.unsuccessful += 1;
+            match result {
+                ConversionUpdate::Started(path) => progress.current_path = Some(path),
+                ConversionUpdate::Finished { source, result } => {
+                    progress.processed += 1;
+                    progress.current_path = None;
+                    match result {
+                        Ok(completed) => {
+                            self.completed_conversions.push(completed);
+                            progress.successful += 1;
+                        }
+                        Err(_) => {
+                            self.conversion_queue.push(source);
+                            progress.unsuccessful += 1;
+                        }
+                    }
                 }
             }
         }
@@ -1770,8 +1792,22 @@ fn render_conversion_progress(frame: &mut Frame, progress: &ConversionProgress) 
         height,
     };
     let remaining = progress.total.saturating_sub(progress.processed);
+    const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner =
+        SPINNER[(progress.started_at.elapsed().as_millis() / 80 % SPINNER.len() as u128) as usize];
+    let current = progress
+        .current_path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("Preparing next track…");
     let lines = vec![
-        Line::raw("Converting files — controls are temporarily disabled."),
+        Line::styled(
+            format!("{spinner} Converting: {current}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Line::raw(""),
         Line::raw(format!(
             "Processed: {}/{}",
@@ -2069,10 +2105,24 @@ mod tests {
             processed: 0,
             successful: 0,
             unsuccessful: 0,
+            current_path: None,
+            started_at: Instant::now(),
         });
         app.conversion_receiver = Some(receiver);
         sender
-            .send(ConversionResult {
+            .send(ConversionUpdate::Started(PathBuf::from("current.mp3")))
+            .unwrap();
+        app.refresh_conversion();
+        assert_eq!(
+            app.conversion_progress
+                .as_ref()
+                .unwrap()
+                .current_path
+                .as_deref(),
+            Some(Path::new("current.mp3"))
+        );
+        sender
+            .send(ConversionUpdate::Finished {
                 source: PathBuf::from("failed.mp3"),
                 result: Err("conversion failed".into()),
             })
