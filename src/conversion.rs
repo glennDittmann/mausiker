@@ -10,24 +10,11 @@ pub struct CompletedConversion {
     pub output: PathBuf,
 }
 
-pub fn output_root(library_root: &Path) -> PathBuf {
-    let name = library_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("music");
-    library_root
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!("{name}-m4a"))
-}
-
 pub fn output_path(library_root: &Path, source: &Path) -> Result<PathBuf, String> {
-    let relative = source
-        .strip_prefix(library_root)
-        .map_err(|_| "source is outside the selected music library".to_owned())?;
-    Ok(output_root(library_root)
-        .join(relative)
-        .with_extension("m4a"))
+    if !source.starts_with(library_root) {
+        return Err("source is outside the selected music library".to_owned());
+    }
+    Ok(source.with_extension("m4a"))
 }
 
 pub fn convert(library_root: &Path, source: &Path) -> Result<CompletedConversion, String> {
@@ -105,16 +92,26 @@ pub fn verify_output(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{output_path, output_root};
+    use super::output_path;
     use std::path::Path;
 
     #[test]
-    fn creates_an_m4a_sibling_library_and_preserves_subfolders() {
+    fn creates_an_m4a_file_beside_its_source() {
         let root = Path::new("/music/library");
-        assert_eq!(output_root(root), Path::new("/music/library-m4a"));
         assert_eq!(
             output_path(root, Path::new("/music/library/Rap/Artist/Album/01.flac")).unwrap(),
-            Path::new("/music/library-m4a/Rap/Artist/Album/01.m4a")
+            Path::new("/music/library/Rap/Artist/Album/01.m4a")
+        );
+    }
+
+    #[test]
+    fn rejects_a_source_outside_the_library() {
+        assert!(
+            output_path(
+                Path::new("/music/library"),
+                Path::new("/music/elsewhere/01.flac")
+            )
+            .is_err()
         );
     }
 }

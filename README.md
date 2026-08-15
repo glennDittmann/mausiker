@@ -60,7 +60,7 @@ Excluded folders are skipped before Mausiker reads their audio metadata.
 
 ## Conversion queue
 
-Select a track or expanded album and press `c` to queue its non-M4A tracks. Press `C` to convert the queue to AAC at 192 kbps in a separate sibling folder named `<library>-m4a`, preserving the original subfolder layout. Mausiker maps metadata and attached artwork streams, then verifies each generated file before marking it complete.
+Select a track or expanded album and press `c` to queue its non-M4A tracks. Press `C` to convert the queue to AAC at 192 kbps, saving each M4A beside its original file. Mausiker maps metadata and attached artwork streams, then verifies each generated file before marking it complete.
 
 Original files are always kept after conversion. Press `d` only when you are ready to remove successfully verified originals; the app asks for an explicit `y` confirmation and verifies each output once more before deletion. Existing output files are never overwritten.
 

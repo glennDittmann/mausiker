@@ -16,7 +16,7 @@
   - [x] Include featured track artists in album search results
   - [x] Filter tracks by release-date completeness or recent file changes
   - [ ] Define and apply a cohesive color scheme
-- [x] Safe conversion queue: separate output folder, metadata preservation, verification, and explicit original-file deletion
+- [x] Safe conversion queue: side-by-side output, metadata preservation, verification, and explicit original-file deletion
 - [x] Preview the selected song with Space
 - [x] Configure subfolders to exclude from library scans
 - [x] Add a folder view: treat a track's parent as its album folder, that folder's parent as its artist, and any higher folder as a music grouping
