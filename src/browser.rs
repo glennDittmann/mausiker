@@ -1221,10 +1221,10 @@ impl App {
 fn group_by_album(tracks: Vec<Track>) -> Vec<Album> {
     let mut albums: Vec<Album> = Vec::new();
     for track in tracks {
-        if let Some(album) = albums
-            .iter_mut()
-            .find(|album| album.artist == track.album_artist && album.title == track.album)
-        {
+        if let Some(album) = albums.iter_mut().find(|album| album.title == track.album) {
+            if album.artist != track.album_artist {
+                album.artist = "Various Artists".into();
+            }
             album.tracks.push(track);
         } else {
             albums.push(Album {
@@ -1953,6 +1953,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["First", "Second"]
         );
+    }
+
+    #[test]
+    fn groups_compilation_tracks_with_different_album_artists() {
+        let albums = group_by_album(vec![
+            track("First", "Artist One", "Artist One", "Smash Hits Vol. 20", 1),
+            track(
+                "Second",
+                "Artist Two",
+                "Artist Two",
+                "Smash Hits Vol. 20",
+                2,
+            ),
+        ]);
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].artist, "Various Artists");
+        assert_eq!(albums[0].tracks.len(), 2);
     }
 
     #[test]
