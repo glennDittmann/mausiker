@@ -1177,11 +1177,10 @@ impl App {
                     self.expanded_albums.insert(album);
                 }
             }
-            Some(LibraryRow::FolderGroup(group)) => {
-                if !self.expanded_folder_groups.remove(&group) {
-                    self.expanded_folder_groups.insert(group);
-                }
+            Some(LibraryRow::FolderGroup(group)) if !self.expanded_folder_groups.remove(&group) => {
+                self.expanded_folder_groups.insert(group);
             }
+            Some(LibraryRow::FolderGroup(_)) => {}
             _ => {}
         }
     }
@@ -1530,15 +1529,13 @@ fn render(frame: &mut Frame, app: &mut App) {
                         .unwrap_or_else(|| "--".into()),
                     track.title
                 ))
-                .style(
-                    is_queued
-                        .then(|| {
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD)
-                        })
-                        .unwrap_or_default(),
-                ),
+                .style(if is_queued {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }),
                 Cell::from(track.artist.clone()),
                 Cell::from(""),
                 Cell::from(
@@ -1759,9 +1756,11 @@ fn sanitized_file_stem(title: &str) -> String {
             filename.push(character);
         }
     }
-    (!filename.is_empty())
-        .then_some(filename)
-        .unwrap_or("Untitled".into())
+    if filename.is_empty() {
+        "Untitled".into()
+    } else {
+        filename
+    }
 }
 
 fn render_path_inspector(frame: &mut Frame, paths: &[PathBuf]) {

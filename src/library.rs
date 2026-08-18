@@ -87,7 +87,7 @@ fn is_supported_audio(path: &Path) -> bool {
         Some(extension) if matches!(extension.as_str(), "mp3" | "m4a" | "mp4" | "aac" | "flac" | "wav" | "ogg" | "opus"))
 }
 
-fn read_track(path: &Path) -> lofty::error::Result<Track> {
+fn read_track(path: &Path) -> Result<Track, lofty::error::FileParseError> {
     let tagged_file = read_from_path(path)?;
     let tag = tagged_file.primary_tag();
     let fallback_title = path
