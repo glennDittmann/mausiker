@@ -445,6 +445,21 @@ impl App {
         }
     }
 
+    fn visible_library_totals(&self) -> (usize, usize, u64) {
+        self.active_albums()
+            .iter()
+            .filter(|album| self.album_matches(album))
+            .fold((0, 0, 0), |(albums, tracks, bytes), album| {
+                let matching_tracks = album
+                    .tracks
+                    .iter()
+                    .filter(|track| self.track_matches_filter(track));
+                let track_count = matching_tracks.clone().count();
+                let track_bytes = matching_tracks.map(|track| track.bytes).sum::<u64>();
+                (albums + 1, tracks + track_count, bytes + track_bytes)
+            })
+    }
+
     fn toggle_view(&mut self) {
         self.view_mode = match self.view_mode {
             ViewMode::AlbumMetadata => ViewMode::Folders,
@@ -1343,17 +1358,25 @@ fn render(frame: &mut Frame, app: &mut App) {
                 .sum::<u64>(),
         )
     };
-    let summary = format!(
-        "{} {} · {} tracks · {} · {} unreadable",
-        album_count,
-        match view_mode {
-            ViewMode::AlbumMetadata => "albums",
-            ViewMode::Folders => "folder albums",
-        },
-        track_count,
-        format_bytes(total_bytes),
-        app.unreadable
-    );
+    let view_label = match view_mode {
+        ViewMode::AlbumMetadata => "albums",
+        ViewMode::Folders => "folder albums",
+    };
+    let summary = if app.search.is_some() || app.active_filter.is_some() {
+        let (visible_albums, visible_tracks, visible_bytes) = app.visible_library_totals();
+        format!(
+            "{visible_albums}/{album_count} {view_label} · {visible_tracks}/{track_count} tracks · {}/{} · {} unreadable",
+            format_bytes(visible_bytes),
+            format_bytes(total_bytes),
+            app.unreadable
+        )
+    } else {
+        format!(
+            "{album_count} {view_label} · {track_count} tracks · {} · {} unreadable",
+            format_bytes(total_bytes),
+            app.unreadable
+        )
+    };
     let mut summary_spans = vec![Span::raw(summary)];
     if let Some(playback) = &app.playback {
         summary_spans.push(Span::raw("  "));
@@ -2069,6 +2092,28 @@ mod tests {
                 LibraryRow::Track { album: 0, track: 0 }
             ]
         );
+    }
+
+    #[test]
+    fn visible_library_totals_reflect_active_search_and_track_filter() {
+        let mut first = track("First", "Artist One", "Artist One", "Record One", 1);
+        first.release_date = None;
+        let app = App::from_tracks(
+            PathBuf::new(),
+            vec![
+                first,
+                track("Second", "Artist One", "Artist One", "Record One", 2),
+                track("Third", "Artist Two", "Artist Two", "Record Two", 1),
+            ],
+            0,
+        );
+        let mut app = app;
+        app.search = Some("record one".into());
+
+        assert_eq!(app.visible_library_totals(), (1, 2, 2));
+
+        app.active_filter = Some(TrackFilter::NoReleaseDate);
+        assert_eq!(app.visible_library_totals(), (1, 1, 1));
     }
 
     #[test]
