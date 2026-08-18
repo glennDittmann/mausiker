@@ -1447,11 +1447,10 @@ impl App {
                     self.expanded_albums.insert(album);
                 }
             }
-            Some(LibraryRow::FolderGroup(group)) => {
-                if !self.expanded_folder_groups.remove(&group) {
-                    self.expanded_folder_groups.insert(group);
-                }
+            Some(LibraryRow::FolderGroup(group)) if !self.expanded_folder_groups.remove(&group) => {
+                self.expanded_folder_groups.insert(group);
             }
+            Some(LibraryRow::FolderGroup(_)) => {}
             _ => {}
         }
     }
@@ -1692,9 +1691,10 @@ fn render(frame: &mut Frame, app: &mut App) {
         ViewMode::Folders => "VIEW: Folders".into(),
     }];
     if let Some(playback) = &app.playback {
+        let title_width = content_width.saturating_sub(10).min(36);
         state_tokens.push(format!(
             "PLAYING: {}",
-            truncate_to_width(&playback.title, content_width.saturating_sub(10).min(36))
+            marquee(&playback.title, title_width, playback.started_at.elapsed())
         ));
     }
     if !app.conversion_queue.is_empty() {
@@ -1864,15 +1864,13 @@ fn render(frame: &mut Frame, app: &mut App) {
                         .unwrap_or_else(|| "--".into()),
                     track.title
                 ))
-                .style(
-                    is_queued
-                        .then(|| {
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD)
-                        })
-                        .unwrap_or_default(),
-                ),
+                .style(if is_queued {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }),
                 Cell::from(track.artist.clone()),
                 Cell::from(""),
                 Cell::from(
@@ -2293,15 +2291,15 @@ fn compact_preview_path(path: &Path) -> String {
     for component in components.iter().take(3) {
         prefix.push(component.as_os_str());
     }
-    let parent = components[components.len() - 2]
-        .as_os_str()
-        .to_string_lossy();
-    let filename = components
-        .last()
-        .expect("a non-empty path has a final component")
-        .as_os_str()
-        .to_string_lossy();
-    format!("{}/…/{parent}/{filename}", prefix.display())
+    prefix.push("…");
+    prefix.push(components[components.len() - 2].as_os_str());
+    prefix.push(
+        components
+            .last()
+            .expect("a non-empty path has a final component")
+            .as_os_str(),
+    );
+    prefix.display().to_string()
 }
 
 fn sanitized_file_stem(title: &str) -> String {
@@ -2319,9 +2317,11 @@ fn sanitized_file_stem(title: &str) -> String {
             filename.push(character);
         }
     }
-    (!filename.is_empty())
-        .then_some(filename)
-        .unwrap_or("Untitled".into())
+    if filename.is_empty() {
+        "Untitled".into()
+    } else {
+        filename
+    }
 }
 
 fn render_path_inspector(frame: &mut Frame, paths: &[PathBuf]) {
@@ -2887,15 +2887,22 @@ mod tests {
 
     #[test]
     fn compact_preview_path_keeps_the_filename_and_meaningful_context() {
+        let long_path = Path::new("/home/glenn/Downloads/Illmatic/1_Nas_Illmatic_TheGenesis.m4a");
+        let mut expected = PathBuf::new();
+        for component in long_path.components().take(3) {
+            expected.push(component.as_os_str());
+        }
+        expected.push("…");
+        expected.push("Illmatic");
+        expected.push("1_Nas_Illmatic_TheGenesis.m4a");
         assert_eq!(
-            compact_preview_path(Path::new(
-                "/home/glenn/Downloads/Illmatic/1_Nas_Illmatic_TheGenesis.m4a"
-            )),
-            "/home/glenn/…/Illmatic/1_Nas_Illmatic_TheGenesis.m4a"
+            compact_preview_path(long_path),
+            expected.display().to_string()
         );
+        let short_path = Path::new("/music/Illmatic/01_The_Genesis.m4a");
         assert_eq!(
-            compact_preview_path(Path::new("/music/Illmatic/01_The_Genesis.m4a")),
-            "/music/Illmatic/01_The_Genesis.m4a"
+            compact_preview_path(short_path),
+            short_path.display().to_string()
         );
     }
 
