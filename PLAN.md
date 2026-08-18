@@ -26,7 +26,7 @@
 ## Next UX work (highest user impact first)
 
 - [ ] Make search and filters show result counts against library totals, reveal relevant matches, and highlight the field that matched.
-- [ ] Add a review-and-confirm step for renames and original-file deletion, including affected paths, proposed names, and skipped conflicts.
+- [x] Add a review-and-confirm step for renames and original-file deletion, including affected paths, proposed names, and skipped conflicts.
 - [ ] Add a conversion preflight (queued items, output location, conflicts) and an inspectable per-file result summary when it finishes.
 - [ ] Make `c` toggle queued tracks and advance; on an album or folder, toggle all eligible tracks instead of only adding them.
 - [ ] Make the header responsive so path, playback, queue, and filter state remain readable in narrow terminals.

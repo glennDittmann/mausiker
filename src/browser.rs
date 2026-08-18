@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -113,6 +113,38 @@ enum ConversionUpdate {
     },
 }
 
+struct RenamePreview {
+    plans: Vec<RenamePlan>,
+    scroll: usize,
+}
+
+struct RenamePlan {
+    source: PathBuf,
+    target: Option<PathBuf>,
+    status: RenameStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenameStatus {
+    Ready,
+    Unchanged,
+    MissingTrackNumber,
+    Conflict,
+}
+
+impl RenamePreview {
+    fn ready_count(&self) -> usize {
+        self.plans
+            .iter()
+            .filter(|plan| plan.status == RenameStatus::Ready)
+            .count()
+    }
+
+    fn skipped_count(&self) -> usize {
+        self.plans.len() - self.ready_count()
+    }
+}
+
 impl MetadataEditor {
     fn labels(&self) -> &[&str] {
         match self.target {
@@ -208,7 +240,8 @@ struct App {
     conversion_progress: Option<ConversionProgress>,
     conversion_receiver: Option<Receiver<ConversionUpdate>>,
     completed_conversions: Vec<CompletedConversion>,
-    delete_confirmation: bool,
+    rename_preview: Option<RenamePreview>,
+    delete_confirmation: Option<usize>,
     active_filter: Option<TrackFilter>,
     filter_menu: Option<usize>,
     started_at: Instant,
@@ -229,8 +262,12 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 if !key.is_press() {
                     continue;
                 }
-                if app.delete_confirmation {
+                if app.delete_confirmation.is_some() {
                     app.handle_delete_confirmation(key.code);
+                    continue;
+                }
+                if app.rename_preview.is_some() {
+                    app.handle_rename_confirmation(key.code);
                     continue;
                 }
                 if app.filter_menu.is_some() {
@@ -324,7 +361,8 @@ impl App {
             conversion_progress: None,
             conversion_receiver: None,
             completed_conversions: Vec::new(),
-            delete_confirmation: false,
+            rename_preview: None,
+            delete_confirmation: None,
             active_filter: None,
             filter_menu: None,
             started_at: Instant::now(),
@@ -602,30 +640,72 @@ impl App {
             self.status = Some("Select an album or track to rename its file(s)".into());
             return;
         };
+        self.status = None;
+        self.rename_preview = Some(build_rename_preview(tracks));
+    }
+
+    fn handle_rename_confirmation(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.apply_rename_preview(),
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.rename_preview = None;
+                self.status = Some("Rename cancelled".into());
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let preview = self
+                    .rename_preview
+                    .as_mut()
+                    .expect("a rename preview is active while it is navigated");
+                preview.scroll = (preview.scroll + 1).min(preview.plans.len().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let preview = self
+                    .rename_preview
+                    .as_mut()
+                    .expect("a rename preview is active while it is navigated");
+                preview.scroll = preview.scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_rename_preview(&mut self) {
+        let preview = self
+            .rename_preview
+            .take()
+            .expect("a rename preview is active before it can be applied");
         let mut renamed = 0;
-        let mut skipped = 0;
+        let mut skipped = preview.skipped_count();
         let mut renamed_paths = Vec::new();
-        for track in tracks {
-            let Ok(target) = renamed_track_path(&track) else {
-                skipped += 1;
-                continue;
-            };
-            if target == track.path {
+        for plan in preview.plans {
+            if plan.status != RenameStatus::Ready {
                 continue;
             }
-            if target.exists() {
-                skipped += 1;
-                continue;
-            }
-            match std::fs::rename(&track.path, &target) {
+            let target = plan
+                .target
+                .expect("ready rename plans always include a target path");
+            match std::fs::rename(&plan.source, &target) {
                 Ok(()) => {
-                    renamed_paths.push((track.path, target));
+                    renamed_paths.push((plan.source, target));
                     renamed += 1;
                 }
                 Err(_) => skipped += 1,
             }
         }
-        for (source, target) in &renamed_paths {
+        self.update_renamed_paths(&renamed_paths);
+        if renamed > 0 {
+            self.rescan_preserving_browser_state();
+        }
+        self.status = Some(match (renamed, skipped) {
+            (0, 0) => "File names already match the track numbers and titles".into(),
+            (0, skipped) => format!("No tracks renamed; skipped {skipped}"),
+            (renamed, 0) => format!("Renamed {renamed} track(s)"),
+            (renamed, skipped) => format!("Renamed {renamed} track(s); skipped {skipped}"),
+        });
+    }
+
+    fn update_renamed_paths(&mut self, renamed_paths: &[(PathBuf, PathBuf)]) {
+        for (source, target) in renamed_paths {
             for album in &mut self.albums {
                 for track in &mut album.tracks {
                     if track.path == *source {
@@ -656,12 +736,6 @@ impl App {
                 playback.path = target.clone();
             }
         }
-        self.rescan_preserving_browser_state();
-        self.status = Some(match (renamed, skipped) {
-            (0, 0) => "File names already match the track numbers and titles".into(),
-            (renamed, 0) => format!("Renamed {renamed} track(s)"),
-            (renamed, skipped) => format!("Renamed {renamed} track(s); skipped {skipped}"),
-        });
     }
 
     fn run_conversion_queue(&mut self) {
@@ -767,7 +841,7 @@ impl App {
             self.status = Some("No verified conversions are available to delete".into());
             return;
         }
-        self.delete_confirmation = true;
+        self.delete_confirmation = Some(0);
     }
 
     fn handle_delete_confirmation(&mut self, key: KeyCode) {
@@ -792,15 +866,29 @@ impl App {
                     }
                 }
                 self.completed_conversions = retained;
-                self.delete_confirmation = false;
+                self.delete_confirmation = None;
                 self.rescan();
                 self.status = Some(format!(
                     "Deleted {deleted} original track(s) after verification"
                 ));
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.delete_confirmation = false;
+                self.delete_confirmation = None;
                 self.status = Some("Original files kept".into());
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let scroll = self
+                    .delete_confirmation
+                    .as_mut()
+                    .expect("a deletion preview is active while it is navigated");
+                *scroll = (*scroll + 1).min(self.completed_conversions.len().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let scroll = self
+                    .delete_confirmation
+                    .as_mut()
+                    .expect("a deletion preview is active while it is navigated");
+                *scroll = scroll.saturating_sub(1);
             }
             _ => {}
         }
@@ -1636,8 +1724,11 @@ fn render(frame: &mut Frame, app: &mut App) {
     if let Some(progress) = &app.conversion_progress {
         render_conversion_progress(frame, progress);
     }
-    if app.delete_confirmation {
-        render_delete_confirmation(frame, app.completed_conversions.len());
+    if let Some(preview) = &app.rename_preview {
+        render_rename_confirmation(frame, preview);
+    }
+    if let Some(scroll) = app.delete_confirmation {
+        render_delete_confirmation(frame, &app.completed_conversions, scroll);
     }
     if let Some(selected) = app.filter_menu {
         render_filter_menu(frame, selected);
@@ -1680,21 +1771,134 @@ fn render_filter_menu(frame: &mut Frame, selected: usize) {
     );
 }
 
-fn render_delete_confirmation(frame: &mut Frame, count: usize) {
-    let width = 64.min(frame.area().width.saturating_sub(4));
-    let height = 7.min(frame.area().height.saturating_sub(4));
+fn render_rename_confirmation(frame: &mut Frame, preview: &RenamePreview) {
+    let width = 110.min(frame.area().width.saturating_sub(4));
+    let available_height = frame.area().height.saturating_sub(4);
+    let visible_capacity = (available_height.saturating_sub(6) as usize / 2).max(1);
+    let start = preview
+        .scroll
+        .min(preview.plans.len().saturating_sub(visible_capacity));
+    let visible_plans = preview
+        .plans
+        .len()
+        .saturating_sub(start)
+        .min(visible_capacity);
+    let height = (visible_plans as u16 * 2 + 6).min(available_height).max(5);
     let popup = ratatui::layout::Rect {
         x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
         y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
         width,
         height,
     };
+    let mut lines = vec![Line::raw(format!(
+        "{} track(s) ready · {} skipped · showing {}–{} of {}",
+        preview.ready_count(),
+        preview.skipped_count(),
+        start + 1,
+        start + visible_plans,
+        preview.plans.len()
+    ))];
+    for plan in preview.plans.iter().skip(start).take(visible_plans) {
+        match (&plan.status, &plan.target) {
+            (RenameStatus::Ready, Some(target)) => {
+                lines.push(Line::raw(format!(
+                    "RENAME  {}",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(format!(
+                    "    →   {}",
+                    compact_preview_path(target)
+                )));
+            }
+            (RenameStatus::Unchanged, _) => {
+                lines.push(Line::raw(format!(
+                    "KEEP    {} (already matches)",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(""));
+            }
+            (RenameStatus::MissingTrackNumber, _) => {
+                lines.push(Line::raw(format!(
+                    "SKIP    {} (missing track number)",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(""));
+            }
+            (RenameStatus::Conflict, Some(target)) => {
+                lines.push(Line::raw(format!(
+                    "SKIP    {}",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(format!(
+                    "    →   {} (target already exists or is duplicated)",
+                    compact_preview_path(target)
+                )));
+            }
+            _ => unreachable!("rename plans with a target status include a target path"),
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "↑/k ↓/j review · y confirm rename · Esc keep current names",
+    ));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(format!(
-            "Delete {count} original track(s)?\n\nEach converted M4A will be verified again first.\nThis cannot be undone.  y confirm · Esc keep originals"
-        ))
-        .block(Block::default().borders(Borders::ALL).title(" Delete originals? ")),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Review rename "),
+        ),
+        popup,
+    );
+}
+
+fn render_delete_confirmation(
+    frame: &mut Frame,
+    conversions: &[CompletedConversion],
+    scroll: usize,
+) {
+    let width = 110.min(frame.area().width.saturating_sub(4));
+    let available_height = frame.area().height.saturating_sub(4);
+    let visible_capacity = (available_height.saturating_sub(7) as usize / 2).max(1);
+    let start = scroll.min(conversions.len().saturating_sub(visible_capacity));
+    let visible_conversions = conversions
+        .len()
+        .saturating_sub(start)
+        .min(visible_capacity);
+    let height = (visible_conversions as u16 * 2 + 7)
+        .min(available_height)
+        .max(5);
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let mut lines = vec![Line::raw(format!(
+        "Delete {} verified original track(s)? This cannot be undone. Showing {}–{} of {}.",
+        conversions.len(),
+        start + 1,
+        start + visible_conversions,
+        conversions.len()
+    ))];
+    for completed in conversions.iter().skip(start).take(visible_conversions) {
+        lines.push(Line::raw(format!(
+            "DELETE  {}",
+            completed.original.display()
+        )));
+        lines.push(Line::raw(format!("KEEP    {}", completed.output.display())));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "↑/k ↓/j review · M4As are re-verified.  y confirm deletion · Esc keep originals",
+    ));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Review original-file deletion "),
+        ),
         popup,
     );
 }
@@ -1765,6 +1969,74 @@ fn renamed_track_path(track: &Track) -> Result<PathBuf, ()> {
         _ => format!("{number:02}_{title}"),
     };
     Ok(track.path.with_file_name(filename))
+}
+
+fn build_rename_preview(tracks: Vec<Track>) -> RenamePreview {
+    let proposed_targets: BTreeMap<_, _> = tracks
+        .iter()
+        .filter_map(|track| {
+            renamed_track_path(track)
+                .ok()
+                .filter(|target| target != &track.path)
+        })
+        .fold(BTreeMap::new(), |mut targets, target| {
+            *targets.entry(target).or_insert(0usize) += 1;
+            targets
+        });
+    let plans = tracks
+        .into_iter()
+        .map(|track| match renamed_track_path(&track) {
+            Err(()) => RenamePlan {
+                source: track.path,
+                target: None,
+                status: RenameStatus::MissingTrackNumber,
+            },
+            Ok(target) if target == track.path => RenamePlan {
+                source: track.path,
+                target: Some(target),
+                status: RenameStatus::Unchanged,
+            },
+            Ok(target)
+                if target.exists()
+                    || proposed_targets
+                        .get(&target)
+                        .is_some_and(|count| *count > 1) =>
+            {
+                RenamePlan {
+                    source: track.path,
+                    target: Some(target),
+                    status: RenameStatus::Conflict,
+                }
+            }
+            Ok(target) => RenamePlan {
+                source: track.path,
+                target: Some(target),
+                status: RenameStatus::Ready,
+            },
+        })
+        .collect();
+    RenamePreview { plans, scroll: 0 }
+}
+
+fn compact_preview_path(path: &Path) -> String {
+    let components: Vec<_> = path.components().collect();
+    if components.len() <= 5 {
+        return path.display().to_string();
+    }
+
+    let mut prefix = PathBuf::new();
+    for component in components.iter().take(3) {
+        prefix.push(component.as_os_str());
+    }
+    let parent = components[components.len() - 2]
+        .as_os_str()
+        .to_string_lossy();
+    let filename = components
+        .last()
+        .expect("a non-empty path has a final component")
+        .as_os_str()
+        .to_string_lossy();
+    format!("{}/…/{parent}/{filename}", prefix.display())
 }
 
 fn sanitized_file_stem(title: &str) -> String {
@@ -2176,6 +2448,51 @@ mod tests {
         track.track_number = None;
 
         assert!(renamed_track_path(&track).is_err());
+    }
+
+    #[test]
+    fn rename_preview_identifies_unchanged_missing_and_conflicting_tracks() {
+        let mut unchanged = track("First", "Artist", "Artist", "Album", 1);
+        unchanged.path = PathBuf::from("/not-a-real-library/01_First.mp3");
+        let mut missing_number = track("Second", "Artist", "Artist", "Album", 2);
+        missing_number.path = PathBuf::from("/not-a-real-library/old.mp3");
+        missing_number.track_number = None;
+        let mut duplicate_first = track("Duplicate", "Artist", "Artist", "Album", 3);
+        duplicate_first.path = PathBuf::from("/not-a-real-library/a.mp3");
+        let mut duplicate_second = track("Duplicate", "Artist", "Artist", "Album", 3);
+        duplicate_second.path = PathBuf::from("/not-a-real-library/b.mp3");
+        let mut ready = track("Ready", "Artist", "Artist", "Album", 4);
+        ready.path = PathBuf::from("/not-a-real-library/old-ready.mp3");
+
+        let preview = build_rename_preview(vec![
+            unchanged,
+            missing_number,
+            duplicate_first,
+            duplicate_second,
+            ready,
+        ]);
+
+        assert_eq!(preview.ready_count(), 1);
+        assert_eq!(preview.skipped_count(), 4);
+        assert_eq!(preview.plans[0].status, RenameStatus::Unchanged);
+        assert_eq!(preview.plans[1].status, RenameStatus::MissingTrackNumber);
+        assert_eq!(preview.plans[2].status, RenameStatus::Conflict);
+        assert_eq!(preview.plans[3].status, RenameStatus::Conflict);
+        assert_eq!(preview.plans[4].status, RenameStatus::Ready);
+    }
+
+    #[test]
+    fn compact_preview_path_keeps_the_filename_and_meaningful_context() {
+        assert_eq!(
+            compact_preview_path(Path::new(
+                "/home/glenn/Downloads/Illmatic/1_Nas_Illmatic_TheGenesis.m4a"
+            )),
+            "/home/glenn/…/Illmatic/1_Nas_Illmatic_TheGenesis.m4a"
+        );
+        assert_eq!(
+            compact_preview_path(Path::new("/music/Illmatic/01_The_Genesis.m4a")),
+            "/music/Illmatic/01_The_Genesis.m4a"
+        );
     }
 
     #[test]
