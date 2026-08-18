@@ -34,7 +34,7 @@
 | `i` | Show full file path(s) for the selected album or track |
 | `r` | Rename selected track or album tracks to `NN_Title.ext` |
 | `v` | Toggle metadata-album and filesystem-folder views |
-| `c` | Add the selected track or album to the M4A conversion queue |
+| `c` | Toggle the selected track, album, or folder in the M4A conversion queue |
 | `C` | Review queued M4A conversions, then start ready tracks |
 | `d` | Request deletion of verified conversion originals; confirm with `y` or cancel with `Esc` |
 | `Ctrl-K` | Search albums and artists |

@@ -660,25 +660,45 @@ impl App {
                 .collect(),
             LibraryRow::Track { .. } => unreachable!("track rows are handled above"),
         };
+        let eligible_paths: Vec<_> = paths
+            .into_iter()
+            .filter(|path| {
+                !path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+            })
+            .collect();
+        if eligible_paths.is_empty() {
+            self.status = Some("M4A files are already in the target format".into());
+            return;
+        }
+        if eligible_paths
+            .iter()
+            .all(|path| self.conversion_queue.contains(path))
+        {
+            self.conversion_queue
+                .retain(|queued| !eligible_paths.contains(queued));
+            self.status = Some(format!(
+                "Removed {} track(s) from the conversion queue",
+                eligible_paths.len()
+            ));
+            return;
+        }
+
         let mut queued = 0;
-        let mut skipped = 0;
-        for path in paths {
-            if path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
-            {
-                skipped += 1;
-            } else if !self.conversion_queue.contains(&path) {
+        let mut already_queued = 0;
+        for path in eligible_paths {
+            if self.conversion_queue.contains(&path) {
+                already_queued += 1;
+            } else {
                 self.conversion_queue.push(path);
                 queued += 1;
             }
         }
-        self.status = Some(if queued > 0 {
+        self.status = Some(if already_queued == 0 {
             format!("Queued {queued} track(s) for M4A conversion")
-        } else if skipped > 0 {
-            "M4A files are already in the target format".into()
         } else {
-            "All selected album tracks are already queued".into()
+            format!("Queued {queued} track(s); {already_queued} already queued")
         });
     }
 
@@ -2921,7 +2941,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_key_on_an_album_adds_all_eligible_tracks() {
+    fn queue_key_on_an_album_toggles_all_eligible_tracks() {
         let mut app = App::from_tracks(
             PathBuf::new(),
             vec![
@@ -2937,6 +2957,10 @@ mod tests {
             app.conversion_queue,
             [PathBuf::from("1.mp3"), PathBuf::from("2.mp3")]
         );
+
+        app.enqueue_selected();
+
+        assert!(app.conversion_queue.is_empty());
     }
 
     #[test]
