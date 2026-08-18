@@ -35,7 +35,7 @@
 | `r` | Rename selected track or album tracks to `NN_Title.ext` |
 | `v` | Toggle metadata-album and filesystem-folder views |
 | `c` | Add the selected track or album to the M4A conversion queue |
-| `C` | Convert all queued tracks |
+| `C` | Review queued M4A conversions, then start ready tracks |
 | `d` | Request deletion of verified conversion originals; confirm with `y` or cancel with `Esc` |
 | `Ctrl-K` | Search albums and artists |
 | `Esc` | Cancel an edit/search, clear an active filter, or quit |
@@ -60,7 +60,7 @@ Excluded folders are skipped before Mausiker reads their audio metadata.
 
 ## Conversion queue
 
-Select a track or expanded album and press `c` to queue its non-M4A tracks. Press `C` to convert the queue to AAC at 192 kbps, saving each M4A beside its original file. Mausiker maps metadata and attached artwork streams, then verifies each generated file before marking it complete.
+Select a track or expanded album and press `c` to queue its non-M4A tracks. Press `C` to review each proposed output and any conflicts, then confirm conversion of ready tracks to AAC at 192 kbps. Each M4A is saved beside its original file; Mausiker maps metadata and attached artwork streams, then verifies each generated file before marking it complete.
 
 Original files are always kept after conversion. Press `d` only when you are ready to remove successfully verified originals; the app asks for an explicit `y` confirmation and verifies each output once more before deletion. Existing output files are never overwritten.
 

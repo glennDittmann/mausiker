@@ -113,6 +113,56 @@ enum ConversionUpdate {
     },
 }
 
+struct ConversionPreview {
+    plans: Vec<ConversionPlan>,
+    scroll: usize,
+}
+
+struct ConversionPlan {
+    source: PathBuf,
+    output: Option<PathBuf>,
+    status: ConversionPlanStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConversionPlanStatus {
+    Ready,
+    AlreadyM4a,
+    OutputExists,
+    OutsideLibrary,
+}
+
+impl ConversionPreview {
+    fn ready_count(&self) -> usize {
+        self.plans
+            .iter()
+            .filter(|plan| plan.status == ConversionPlanStatus::Ready)
+            .count()
+    }
+
+    fn skipped_count(&self) -> usize {
+        self.plans.len() - self.ready_count()
+    }
+}
+
+struct ConversionFailure {
+    source: PathBuf,
+    error: String,
+}
+
+struct ConversionResult {
+    successful: Vec<CompletedConversion>,
+    failures: Vec<ConversionFailure>,
+    remaining_queued: usize,
+    scroll: usize,
+}
+
+impl ConversionResult {
+    fn total(&self) -> usize {
+        self.successful.len() + self.failures.len()
+    }
+}
+
 struct RenamePreview {
     plans: Vec<RenamePlan>,
     scroll: usize,
@@ -237,8 +287,12 @@ struct App {
     status: Option<String>,
     playback: Option<Playback>,
     conversion_queue: Vec<PathBuf>,
+    conversion_preview: Option<ConversionPreview>,
     conversion_progress: Option<ConversionProgress>,
     conversion_receiver: Option<Receiver<ConversionUpdate>>,
+    conversion_successes: Vec<CompletedConversion>,
+    conversion_failures: Vec<ConversionFailure>,
+    conversion_result: Option<ConversionResult>,
     completed_conversions: Vec<CompletedConversion>,
     rename_preview: Option<RenamePreview>,
     delete_confirmation: Option<usize>,
@@ -268,6 +322,14 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 }
                 if app.rename_preview.is_some() {
                     app.handle_rename_confirmation(key.code);
+                    continue;
+                }
+                if app.conversion_preview.is_some() {
+                    app.handle_conversion_preview(key.code);
+                    continue;
+                }
+                if app.conversion_result.is_some() {
+                    app.handle_conversion_result(key.code);
                     continue;
                 }
                 if app.filter_menu.is_some() {
@@ -311,7 +373,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     KeyCode::Char('v') => app.toggle_view(),
                     KeyCode::Char('f') => app.open_filter_menu(),
                     KeyCode::Char('c') => app.enqueue_selected(),
-                    KeyCode::Char('C') => app.run_conversion_queue(),
+                    KeyCode::Char('C') => app.open_conversion_preview(),
                     KeyCode::Char('d') => app.request_delete_originals(),
                     KeyCode::Char('e') => app.open_editor(),
                     KeyCode::Down | KeyCode::Char('j') => app.next(),
@@ -358,8 +420,12 @@ impl App {
             status: None,
             playback: None,
             conversion_queue: Vec::new(),
+            conversion_preview: None,
             conversion_progress: None,
             conversion_receiver: None,
+            conversion_successes: Vec::new(),
+            conversion_failures: Vec::new(),
+            conversion_result: None,
             completed_conversions: Vec::new(),
             rename_preview: None,
             delete_confirmation: None,
@@ -738,12 +804,66 @@ impl App {
         }
     }
 
-    fn run_conversion_queue(&mut self) {
+    fn open_conversion_preview(&mut self) {
         if self.conversion_queue.is_empty() {
             self.status = Some("Conversion queue is empty".into());
             return;
         }
-        let queued = std::mem::take(&mut self.conversion_queue);
+        self.status = None;
+        self.conversion_preview =
+            Some(build_conversion_preview(&self.root, &self.conversion_queue));
+    }
+
+    fn handle_conversion_preview(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.start_previewed_conversions(),
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.conversion_preview = None;
+                self.status = Some("Conversion cancelled".into());
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let preview = self
+                    .conversion_preview
+                    .as_mut()
+                    .expect("a conversion preview is active while it is navigated");
+                preview.scroll = (preview.scroll + 1).min(preview.plans.len().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let preview = self
+                    .conversion_preview
+                    .as_mut()
+                    .expect("a conversion preview is active while it is navigated");
+                preview.scroll = preview.scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn start_previewed_conversions(&mut self) {
+        let preview = self
+            .conversion_preview
+            .take()
+            .expect("a conversion preview is active before it can be applied");
+        let queued: Vec<_> = preview
+            .plans
+            .iter()
+            .filter(|plan| plan.status == ConversionPlanStatus::Ready)
+            .map(|plan| plan.source.clone())
+            .collect();
+        self.conversion_queue = preview
+            .plans
+            .into_iter()
+            .filter(|plan| plan.status != ConversionPlanStatus::Ready)
+            .map(|plan| plan.source)
+            .collect();
+        if queued.is_empty() {
+            self.status = Some("No queued tracks can be converted; conflicts remain queued".into());
+            return;
+        }
+        self.start_conversion_queue(queued);
+    }
+
+    fn start_conversion_queue(&mut self, queued: Vec<PathBuf>) {
         let total = queued.len();
         let root = self.root.clone();
         let (sender, receiver) = mpsc::channel();
@@ -773,6 +893,9 @@ impl App {
             started_at: Instant::now(),
         });
         self.conversion_receiver = Some(receiver);
+        self.conversion_successes.clear();
+        self.conversion_failures.clear();
+        self.conversion_result = None;
         self.status = None;
     }
 
@@ -804,11 +927,14 @@ impl App {
                     progress.current_path = None;
                     match result {
                         Ok(completed) => {
-                            self.completed_conversions.push(completed);
+                            self.completed_conversions.push(completed.clone());
+                            self.conversion_successes.push(completed);
                             progress.successful += 1;
                         }
-                        Err(_) => {
-                            self.conversion_queue.push(source);
+                        Err(error) => {
+                            self.conversion_queue.push(source.clone());
+                            self.conversion_failures
+                                .push(ConversionFailure { source, error });
                             progress.unsuccessful += 1;
                         }
                     }
@@ -822,17 +948,38 @@ impl App {
                 .expect("conversion progress exists when worker finishes");
             self.conversion_receiver = None;
             self.rescan();
-            self.status = Some(if progress.unsuccessful == 0 {
-                format!(
-                    "Converted and verified {} track(s); originals kept",
-                    progress.successful
-                )
-            } else {
-                format!(
-                    "Converted {}; {} track(s) remain queued",
-                    progress.successful, progress.unsuccessful
-                )
+            self.conversion_result = Some(ConversionResult {
+                successful: std::mem::take(&mut self.conversion_successes),
+                failures: std::mem::take(&mut self.conversion_failures),
+                remaining_queued: self.conversion_queue.len(),
+                scroll: 0,
             });
+            self.status = Some(format!(
+                "Converted and verified {} track(s); {} remain queued",
+                progress.successful,
+                self.conversion_queue.len()
+            ));
+        }
+    }
+
+    fn handle_conversion_result(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('C') => self.conversion_result = None,
+            KeyCode::Down | KeyCode::Char('j') => {
+                let result = self
+                    .conversion_result
+                    .as_mut()
+                    .expect("a conversion result is active while it is navigated");
+                result.scroll = (result.scroll + 1).min(result.total().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let result = self
+                    .conversion_result
+                    .as_mut()
+                    .expect("a conversion result is active while it is navigated");
+                result.scroll = result.scroll.saturating_sub(1);
+            }
+            _ => {}
         }
     }
 
@@ -1724,6 +1871,12 @@ fn render(frame: &mut Frame, app: &mut App) {
     if let Some(progress) = &app.conversion_progress {
         render_conversion_progress(frame, progress);
     }
+    if let Some(preview) = &app.conversion_preview {
+        render_conversion_preview(frame, preview);
+    }
+    if let Some(result) = &app.conversion_result {
+        render_conversion_result(frame, result);
+    }
     if let Some(preview) = &app.rename_preview {
         render_rename_confirmation(frame, preview);
     }
@@ -2018,6 +2171,42 @@ fn build_rename_preview(tracks: Vec<Track>) -> RenamePreview {
     RenamePreview { plans, scroll: 0 }
 }
 
+fn build_conversion_preview(root: &Path, queued: &[PathBuf]) -> ConversionPreview {
+    let plans = queued
+        .iter()
+        .map(|source| {
+            if source
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+            {
+                return ConversionPlan {
+                    source: source.clone(),
+                    output: Some(source.clone()),
+                    status: ConversionPlanStatus::AlreadyM4a,
+                };
+            }
+            match conversion::output_path(root, source) {
+                Err(_) => ConversionPlan {
+                    source: source.clone(),
+                    output: None,
+                    status: ConversionPlanStatus::OutsideLibrary,
+                },
+                Ok(output) if output.exists() => ConversionPlan {
+                    source: source.clone(),
+                    output: Some(output),
+                    status: ConversionPlanStatus::OutputExists,
+                },
+                Ok(output) => ConversionPlan {
+                    source: source.clone(),
+                    output: Some(output),
+                    status: ConversionPlanStatus::Ready,
+                },
+            }
+        })
+        .collect();
+    ConversionPreview { plans, scroll: 0 }
+}
+
 fn compact_preview_path(path: &Path) -> String {
     let components: Vec<_> = path.components().collect();
     if components.len() <= 5 {
@@ -2143,6 +2332,145 @@ fn render_conversion_progress(frame: &mut Frame, progress: &ConversionProgress) 
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Conversion progress "),
+        ),
+        popup,
+    );
+}
+
+fn render_conversion_preview(frame: &mut Frame, preview: &ConversionPreview) {
+    let width = 110.min(frame.area().width.saturating_sub(4));
+    let available_height = frame.area().height.saturating_sub(4);
+    let visible_capacity = (available_height.saturating_sub(6) as usize / 2).max(1);
+    let start = preview
+        .scroll
+        .min(preview.plans.len().saturating_sub(visible_capacity));
+    let visible_plans = preview
+        .plans
+        .len()
+        .saturating_sub(start)
+        .min(visible_capacity);
+    let height = (visible_plans as u16 * 2 + 6).min(available_height).max(5);
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let mut lines = vec![Line::raw(format!(
+        "M4A files are written beside their sources · {} ready · {} skipped · showing {}–{} of {}",
+        preview.ready_count(),
+        preview.skipped_count(),
+        start + 1,
+        start + visible_plans,
+        preview.plans.len()
+    ))];
+    for plan in preview.plans.iter().skip(start).take(visible_plans) {
+        match (&plan.status, &plan.output) {
+            (ConversionPlanStatus::Ready, Some(output)) => {
+                lines.push(Line::raw(format!(
+                    "CONVERT  {}",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(format!(
+                    "    →    {}",
+                    compact_preview_path(output)
+                )));
+            }
+            (ConversionPlanStatus::AlreadyM4a, _) => {
+                lines.push(Line::raw(format!(
+                    "SKIP     {} (already M4A)",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(""));
+            }
+            (ConversionPlanStatus::OutputExists, Some(output)) => {
+                lines.push(Line::raw(format!(
+                    "SKIP     {}",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(format!(
+                    "    →    {} (output already exists)",
+                    compact_preview_path(output)
+                )));
+            }
+            (ConversionPlanStatus::OutsideLibrary, _) => {
+                lines.push(Line::raw(format!(
+                    "SKIP     {} (outside the selected library)",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(""));
+            }
+            _ => unreachable!("conversion plans have an output whenever their status needs one"),
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "↑/k ↓/j review · y start ready conversions · Esc keep queue",
+    ));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Review M4A conversion "),
+        ),
+        popup,
+    );
+}
+
+fn render_conversion_result(frame: &mut Frame, result: &ConversionResult) {
+    let width = 110.min(frame.area().width.saturating_sub(4));
+    let available_height = frame.area().height.saturating_sub(4);
+    let visible_capacity = (available_height.saturating_sub(6) as usize / 2).max(1);
+    let start = result
+        .scroll
+        .min(result.total().saturating_sub(visible_capacity));
+    let visible_entries = result.total().saturating_sub(start).min(visible_capacity);
+    let height = (visible_entries as u16 * 2 + 6)
+        .min(available_height)
+        .max(5);
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let mut lines = vec![Line::raw(format!(
+        "{} verified · {} failed · {} remain queued · showing {}–{} of {}",
+        result.successful.len(),
+        result.failures.len(),
+        result.remaining_queued,
+        start + 1,
+        start + visible_entries,
+        result.total()
+    ))];
+    for entry in start..start + visible_entries {
+        if let Some(completed) = result.successful.get(entry) {
+            lines.push(Line::raw(format!(
+                "VERIFIED  {}",
+                compact_preview_path(&completed.original)
+            )));
+            lines.push(Line::raw(format!(
+                "    →     {}",
+                compact_preview_path(&completed.output)
+            )));
+        } else {
+            let failure = &result.failures[entry - result.successful.len()];
+            lines.push(Line::raw(format!(
+                "FAILED    {}",
+                compact_preview_path(&failure.source)
+            )));
+            lines.push(Line::raw(format!("    {}", failure.error)));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw("↑/k ↓/j review · Esc close"));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Conversion results "),
         ),
         popup,
     );
@@ -2492,6 +2820,31 @@ mod tests {
         assert_eq!(
             compact_preview_path(Path::new("/music/Illmatic/01_The_Genesis.m4a")),
             "/music/Illmatic/01_The_Genesis.m4a"
+        );
+    }
+
+    #[test]
+    fn conversion_preview_shows_outputs_and_skips_unconvertible_sources() {
+        let preview = build_conversion_preview(
+            Path::new("/not-a-real-library"),
+            &[
+                PathBuf::from("/not-a-real-library/song.flac"),
+                PathBuf::from("/not-a-real-library/already.m4a"),
+                PathBuf::from("/outside-library/song.mp3"),
+            ],
+        );
+
+        assert_eq!(preview.ready_count(), 1);
+        assert_eq!(preview.skipped_count(), 2);
+        assert_eq!(preview.plans[0].status, ConversionPlanStatus::Ready);
+        assert_eq!(
+            preview.plans[0].output.as_deref(),
+            Some(Path::new("/not-a-real-library/song.m4a"))
+        );
+        assert_eq!(preview.plans[1].status, ConversionPlanStatus::AlreadyM4a);
+        assert_eq!(
+            preview.plans[2].status,
+            ConversionPlanStatus::OutsideLibrary
         );
     }
 
