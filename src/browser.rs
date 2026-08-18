@@ -1751,7 +1751,7 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     let header = Row::new(match view_mode {
         ViewMode::AlbumMetadata => [
-            "Title", "Artist", "Album", "Year", "Length", "Format", "Size",
+            "Title", "Artist", "Tracks", "Year", "Length", "Formats", "Size",
         ],
         ViewMode::Folders => [
             "Album folder",
@@ -1759,7 +1759,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             "Tracks",
             "Year",
             "Length",
-            "Format",
+            "Formats",
             "Size",
         ],
     })
@@ -1795,7 +1795,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(format!("{} albums", group.albums.len())),
                 Cell::from(""),
                 Cell::from(""),
-                Cell::from("FOLDER"),
+                Cell::from(""),
                 Cell::from(""),
             ])
             .style(
@@ -1831,7 +1831,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                         .map(format_duration)
                         .unwrap_or_else(|| "—".into()),
                 ),
-                Cell::from("ALBUM"),
+                Cell::from(album_format_summary(&album.tracks)),
                 Cell::from(format_bytes(
                     album.tracks.iter().map(|track| track.bytes).sum(),
                 )),
@@ -2603,6 +2603,19 @@ fn album_duration(tracks: &[Track]) -> Option<Duration> {
         .reduce(|total, duration| total + duration)
 }
 
+fn album_format_summary(tracks: &[Track]) -> String {
+    let formats: BTreeSet<_> = tracks
+        .iter()
+        .filter_map(|track| track.path.extension()?.to_str())
+        .map(str::to_ascii_uppercase)
+        .collect();
+    match formats.len() {
+        0 => "—".into(),
+        1 => formats.into_iter().next().expect("one format is present"),
+        _ => "MIXED".into(),
+    }
+}
+
 fn format_bytes(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     if bytes >= MIB {
@@ -2852,6 +2865,17 @@ mod tests {
         track.track_number = None;
 
         assert!(renamed_track_path(&track).is_err());
+    }
+
+    #[test]
+    fn album_format_summary_distinguishes_one_format_from_mixed_files() {
+        let mut m4a = track("First", "Artist", "Artist", "Album", 1);
+        m4a.path = PathBuf::from("/music/01.m4a");
+        let mut flac = track("Second", "Artist", "Artist", "Album", 2);
+        flac.path = PathBuf::from("/music/02.flac");
+
+        assert_eq!(album_format_summary(&[m4a.clone()]), "M4A");
+        assert_eq!(album_format_summary(&[m4a, flac]), "MIXED");
     }
 
     #[test]
