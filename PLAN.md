@@ -15,7 +15,6 @@
   - [x] Make active search filters prominent with a subtle visual pulse
   - [x] Include featured track artists in album search results
   - [x] Filter tracks by release-date completeness or recent file changes
-  - [ ] Define and apply a cohesive color scheme
 - [x] Safe conversion queue: side-by-side output, metadata preservation, verification, and explicit original-file deletion
 - [x] Preview the selected song with Space
 - [x] Configure subfolders to exclude from library scans
@@ -23,4 +22,15 @@
 - [x] Mark tracks selected for queue in UI
 - [x] Automatic renaming of tracks/albums to `NN_song_name`, using the track number and title
 - [x] Progress popup for music conversion
-- [ ] c should toggle if already selected and jump to next song, so one can just keep pressing c to mark more songs, c on album de-/selects all tracks in it
+
+## Next UX work (highest user impact first)
+
+- [ ] Make search and filters show result counts against library totals, reveal relevant matches, and highlight the field that matched.
+- [ ] Add a review-and-confirm step for renames and original-file deletion, including affected paths, proposed names, and skipped conflicts.
+- [ ] Add a conversion preflight (queued items, output location, conflicts) and an inspectable per-file result summary when it finishes.
+- [ ] Make `c` toggle queued tracks and advance; on an album or folder, toggle all eligible tracks instead of only adding them.
+- [ ] Make the header responsive so path, playback, queue, and filter state remain readable in narrow terminals.
+- [ ] Clarify table semantics: use a `Tracks` column for album counts and remove or repurpose redundant album-format cells.
+- [ ] Add a `?` help overlay and keep it as the single source of truth for in-app controls and README documentation.
+- [ ] Apply a terminal-theme-resilient visual system with explicit state labels/markers, sufficient selection contrast, and color as secondary meaning.
+- [ ] Make long path/result dialogs navigable, and make blocked metadata saves immediately explain which field needs attention.
