@@ -17,7 +17,7 @@ use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
 };
 
@@ -1590,13 +1590,67 @@ fn track_is_new(track: &Track) -> bool {
         .is_some_and(|age| age <= TWO_WEEKS)
 }
 
+fn truncate_to_width(text: &str, width: usize) -> String {
+    if Line::raw(text).width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".into();
+    }
+    let mut shortened = String::new();
+    for character in text.chars() {
+        let character_width = Line::raw(character.to_string()).width();
+        if Line::raw(&shortened).width() + character_width + 1 > width {
+            break;
+        }
+        shortened.push(character);
+    }
+    shortened.push('…');
+    shortened
+}
+
+fn compact_header_path(path: &Path, width: usize) -> String {
+    let compact = compact_preview_path(path);
+    if Line::raw(&compact).width() <= width {
+        return compact;
+    }
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| path.to_str().unwrap_or("Library"));
+    truncate_to_width(&format!("…/{filename}"), width)
+}
+
+fn wrap_header_tokens(tokens: Vec<String>, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for token in tokens {
+        let token = truncate_to_width(&token, width);
+        let candidate = if current.is_empty() {
+            token.clone()
+        } else {
+            format!("{current} · {token}")
+        };
+        if !current.is_empty() && Line::raw(&candidate).width() > width {
+            lines.push(current);
+            current = token;
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn render(frame: &mut Frame, app: &mut App) {
-    let [header_area, table_area, footer_area] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(4),
-        Constraint::Length(3),
-    ])
-    .areas(frame.area());
     let view_mode = app.view_mode;
     let (album_count, track_count, total_bytes) = {
         let active_albums = app.active_albums();
@@ -1632,64 +1686,66 @@ fn render(frame: &mut Frame, app: &mut App) {
             app.unreadable
         )
     };
-    let mut summary_spans = vec![Span::raw(summary)];
+    let content_width = frame.area().width.saturating_sub(2) as usize;
+    let mut state_tokens = vec![match view_mode {
+        ViewMode::AlbumMetadata => "VIEW: Albums".into(),
+        ViewMode::Folders => "VIEW: Folders".into(),
+    }];
     if let Some(playback) = &app.playback {
-        summary_spans.push(Span::raw("  "));
-        summary_spans.push(Span::styled(
-            " PLAYING ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ));
-        summary_spans.push(Span::styled(
-            marquee(&playback.title, 24, playback.started_at.elapsed()),
-            Style::default().fg(Color::LightGreen),
+        state_tokens.push(format!(
+            "PLAYING: {}",
+            truncate_to_width(&playback.title, content_width.saturating_sub(10).min(36))
         ));
     }
     if !app.conversion_queue.is_empty() {
-        summary_spans.push(Span::raw("  "));
-        summary_spans.push(Span::styled(
-            format!(" QUEUE: {} ", app.conversion_queue.len()),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
+        state_tokens.push(format!("QUEUE: {}", app.conversion_queue.len()));
     }
     if let Some(search) = &app.search {
+        state_tokens.push(format!(
+            "SEARCH: {}",
+            truncate_to_width(search, content_width.saturating_sub(8).min(36))
+        ));
+    }
+    if let Some(filter) = app.active_filter {
+        state_tokens.push(format!("FILTER: {}", filter.label()));
+    }
+    let mut header_lines = vec![
+        Line::raw(format!(
+            "LIBRARY: {}",
+            compact_header_path(&app.root, content_width.saturating_sub(9))
+        )),
+        Line::raw(truncate_to_width(&summary, content_width)),
+    ];
+    let state_style = if app.search.is_some() {
         let pulse_is_bright = (app.started_at.elapsed().as_millis() / 650).is_multiple_of(2);
-        let badge_style = Style::default()
+        Style::default()
             .fg(Color::Black)
             .bg(if pulse_is_bright {
                 Color::Yellow
             } else {
                 Color::LightYellow
             })
-            .add_modifier(Modifier::BOLD);
-        summary_spans.push(Span::raw("  "));
-        summary_spans.push(Span::styled(
-            format!(" FILTER ACTIVE: {search} "),
-            badge_style,
-        ));
-    }
-    if let Some(filter) = app.active_filter {
-        summary_spans.push(Span::raw("  "));
-        summary_spans.push(Span::styled(
-            format!(" FILTER: {} ", filter.label()),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    let summary = Line::from(summary_spans);
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+    header_lines.extend(
+        wrap_header_tokens(state_tokens, content_width)
+            .into_iter()
+            .map(|line| Line::styled(line, state_style)),
+    );
+    let header_height = (header_lines.len() as u16 + 2).min(frame.area().height);
+    let [header_area, table_area, footer_area] = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Min(4),
+        Constraint::Length(3),
+    ])
+    .areas(frame.area());
     frame.render_widget(
-        Paragraph::new(summary).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Mausiker — {} ", app.root.display())),
-        ),
+        Paragraph::new(header_lines)
+            .block(Block::default().borders(Borders::ALL).title(" Mausiker ")),
         header_area,
     );
 
@@ -2841,6 +2897,29 @@ mod tests {
             compact_preview_path(Path::new("/music/Illmatic/01_The_Genesis.m4a")),
             "/music/Illmatic/01_The_Genesis.m4a"
         );
+    }
+
+    #[test]
+    fn responsive_header_helpers_keep_state_readable_within_the_available_width() {
+        let path = compact_header_path(
+            Path::new("/home/glenn/Downloads/Illmatic/1_Nas_Illmatic_TheGenesis.m4a"),
+            24,
+        );
+        assert!(path.starts_with("…/1_Nas_Illmatic"));
+        assert_eq!(Line::raw(&path).width(), 24);
+
+        let lines = wrap_header_tokens(
+            vec![
+                "VIEW: Albums".into(),
+                "PLAYING: The Genesis".into(),
+                "QUEUE: 12".into(),
+                "FILTER: No release date".into(),
+            ],
+            24,
+        );
+        assert!(lines.iter().all(|line| Line::raw(line).width() <= 24));
+        assert!(lines.iter().any(|line| line.contains("PLAYING")));
+        assert!(lines.iter().any(|line| line.contains("QUEUE")));
     }
 
     #[test]
