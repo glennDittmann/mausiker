@@ -62,6 +62,29 @@ impl TrackFilter {
     }
 }
 
+const HELP_CONTROLS: [(&str, &str); 17] = [
+    ("j / ↓ · k / ↑", "Move selection"),
+    ("Enter", "Toggle selected album or folder"),
+    ("→ / l", "Expand selected album or folder"),
+    ("← / h", "Collapse selected album or folder"),
+    ("Space", "Play or stop selected track"),
+    ("e", "Edit selected album or track metadata"),
+    ("i", "Show selected file path(s)"),
+    ("r", "Review and rename selected track(s)"),
+    ("v", "Toggle album-metadata and folder views"),
+    ("f", "Choose a track filter"),
+    (
+        "c",
+        "Toggle selected track, album, or folder in the M4A queue",
+    ),
+    ("C", "Review queued conversions, then start ready tracks"),
+    ("d", "Review verified originals before deletion"),
+    ("Ctrl-K", "Search albums and artists"),
+    ("?", "Open or close this help"),
+    ("Esc", "Cancel, clear search, or quit"),
+    ("q", "Quit"),
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LibraryRow {
     Album(usize),
@@ -298,6 +321,7 @@ struct App {
     delete_confirmation: Option<usize>,
     active_filter: Option<TrackFilter>,
     filter_menu: Option<usize>,
+    help: Option<usize>,
     started_at: Instant,
 }
 
@@ -330,6 +354,10 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                 }
                 if app.conversion_result.is_some() {
                     app.handle_conversion_result(key.code);
+                    continue;
+                }
+                if app.help.is_some() {
+                    app.handle_help_key(key.code);
                     continue;
                 }
                 if app.filter_menu.is_some() {
@@ -376,6 +404,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     KeyCode::Char('C') => app.open_conversion_preview(),
                     KeyCode::Char('d') => app.request_delete_originals(),
                     KeyCode::Char('e') => app.open_editor(),
+                    KeyCode::Char('?') => app.help = Some(0),
                     KeyCode::Down | KeyCode::Char('j') => app.next(),
                     KeyCode::Up | KeyCode::Char('k') => app.previous(),
                     KeyCode::Enter => app.toggle_selected_album(),
@@ -431,6 +460,7 @@ impl App {
             delete_confirmation: None,
             active_filter: None,
             filter_menu: None,
+            help: None,
             started_at: Instant::now(),
         }
     }
@@ -612,6 +642,27 @@ impl App {
                 });
             }
             KeyCode::Esc => self.filter_menu = None,
+            _ => {}
+        }
+    }
+
+    fn handle_help_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => self.help = None,
+            KeyCode::Down | KeyCode::Char('j') => {
+                let scroll = self
+                    .help
+                    .as_mut()
+                    .expect("help is active while it is navigated");
+                *scroll = (*scroll + 1).min(HELP_CONTROLS.len().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let scroll = self
+                    .help
+                    .as_mut()
+                    .expect("help is active while it is navigated");
+                *scroll = scroll.saturating_sub(1);
+            }
             _ => {}
         }
     }
@@ -1924,11 +1975,11 @@ fn render(frame: &mut Frame, app: &mut App) {
     } else if app.filter_menu.is_some() {
         "Filter menu: ↑/↓ select · Enter apply · Esc cancel".into()
     } else if app.search.is_some() {
-        "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · Esc clear filter · q quit".into()
+        "↑/k ↓/j select · Enter toggle · → expand · ← collapse · Ctrl-K search · Esc clear filter · ? help · q quit".into()
     } else if let Some(status) = &app.status {
         format!("{status} · c queue · C convert · d delete originals · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · i path · r rename · f filter · c queue · C convert · d delete · v view · Ctrl-K search · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · i path · r rename · f filter · c queue · C convert · d delete · v view · Ctrl-K search · ? help · q quit"
             .into()
     };
     frame.render_widget(
@@ -1960,6 +2011,47 @@ fn render(frame: &mut Frame, app: &mut App) {
     if let Some(selected) = app.filter_menu {
         render_filter_menu(frame, selected);
     }
+    if let Some(scroll) = app.help {
+        render_help(frame, scroll);
+    }
+}
+
+fn render_help(frame: &mut Frame, scroll: usize) {
+    let width = 80.min(frame.area().width.saturating_sub(4));
+    let available_height = frame.area().height.saturating_sub(4);
+    let visible_capacity = available_height.saturating_sub(5).max(1) as usize;
+    let start = scroll.min(HELP_CONTROLS.len().saturating_sub(visible_capacity));
+    let visible_controls = HELP_CONTROLS
+        .len()
+        .saturating_sub(start)
+        .min(visible_capacity);
+    let height = (visible_controls as u16 + 5).min(available_height).max(5);
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let mut lines = vec![Line::raw(format!(
+        "Showing {}–{} of {} controls",
+        start + 1,
+        start + visible_controls,
+        HELP_CONTROLS.len()
+    ))];
+    lines.extend(
+        HELP_CONTROLS
+            .iter()
+            .skip(start)
+            .take(visible_controls)
+            .map(|(key, action)| Line::raw(format!("{key:<14} {action}"))),
+    );
+    lines.push(Line::raw(""));
+    lines.push(Line::raw("↑/k ↓/j scroll · ?, Enter, or Esc close"));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Help ")),
+        popup,
+    );
 }
 
 fn render_filter_menu(frame: &mut Frame, selected: usize) {
@@ -2951,6 +3043,29 @@ mod tests {
         assert!(lines.iter().all(|line| Line::raw(line).width() <= 24));
         assert!(lines.iter().any(|line| line.contains("PLAYING")));
         assert!(lines.iter().any(|line| line.contains("QUEUE")));
+    }
+
+    #[test]
+    fn help_controls_are_kept_in_sync_with_the_readme() {
+        let readme = include_str!("../README.md");
+        for (key, action) in HELP_CONTROLS {
+            assert!(
+                readme.contains(&format!("| `{key}` | {action} |")),
+                "README is missing the help entry for {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_can_be_scrolled_and_closed() {
+        let mut app = App::from_tracks(PathBuf::new(), Vec::new(), 0);
+        app.help = Some(0);
+
+        app.handle_help_key(KeyCode::Down);
+        assert_eq!(app.help, Some(1));
+
+        app.handle_help_key(KeyCode::Esc);
+        assert_eq!(app.help, None);
     }
 
     #[test]

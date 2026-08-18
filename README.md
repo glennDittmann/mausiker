@@ -26,19 +26,22 @@
 
 | Key | Action |
 | --- | --- |
-| `j` / `↓`, `k` / `↑` | Move selection |
-| `Enter` | Expand or collapse the selected album |
-| `→` / `l`, `←` / `h` | Expand or collapse an album |
-| `Space` | Play or stop the selected track |
+| `j / ↓ · k / ↑` | Move selection |
+| `Enter` | Toggle selected album or folder |
+| `→ / l` | Expand selected album or folder |
+| `← / h` | Collapse selected album or folder |
+| `Space` | Play or stop selected track |
 | `e` | Edit selected album or track metadata |
-| `i` | Show full file path(s) for the selected album or track |
-| `r` | Rename selected track or album tracks to `NN_Title.ext` |
-| `v` | Toggle metadata-album and filesystem-folder views |
-| `c` | Toggle the selected track, album, or folder in the M4A conversion queue |
-| `C` | Review queued M4A conversions, then start ready tracks |
-| `d` | Request deletion of verified conversion originals; confirm with `y` or cancel with `Esc` |
+| `i` | Show selected file path(s) |
+| `r` | Review and rename selected track(s) |
+| `v` | Toggle album-metadata and folder views |
+| `f` | Choose a track filter |
+| `c` | Toggle selected track, album, or folder in the M4A queue |
+| `C` | Review queued conversions, then start ready tracks |
+| `d` | Review verified originals before deletion |
 | `Ctrl-K` | Search albums and artists |
-| `Esc` | Cancel an edit/search, clear an active filter, or quit |
+| `?` | Open or close this help |
+| `Esc` | Cancel, clear search, or quit |
 | `q` | Quit |
 
 ## Playback requirement
