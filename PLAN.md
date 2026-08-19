@@ -5,7 +5,7 @@
 - [x] Edit track and album title/date metadata from the library browser
 - [x] Edit album artists without changing individual track artist credits
 - [x] Validate release-date input before saving metadata
-- [ ] UI refinement
+- [x] UI refinement
   - [x] Group music by album, with expandable albums and drill-in navigation
   - [x] Group featured-artist tracks under the primary album artist
   - [x] Show the total track duration on each album row
@@ -33,4 +33,4 @@
 - [x] Clarify table semantics: use a `Tracks` column for album counts and remove or repurpose redundant album-format cells.
 - [x] Add a `?` help overlay and keep it as the single source of truth for in-app controls and README documentation.
 - [x] Apply a terminal-theme-resilient visual system with explicit state labels/markers, sufficient selection contrast, and color as secondary meaning.
-- [ ] Make long path/result dialogs navigable, and make blocked metadata saves immediately explain which field needs attention.
+- [x] Make long path/result dialogs navigable, and make blocked metadata saves immediately explain which field needs attention.

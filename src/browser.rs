@@ -117,6 +117,13 @@ struct MetadataEditor {
     values: Vec<String>,
     active_field: usize,
     cursor_positions: Vec<usize>,
+    validation_error: Option<String>,
+}
+
+struct PathInspector {
+    paths: Vec<PathBuf>,
+    selected: usize,
+    horizontal_offset: usize,
 }
 
 struct Playback {
@@ -313,7 +320,7 @@ struct App {
     search: Option<String>,
     search_input: Option<String>,
     editor: Option<MetadataEditor>,
-    path_inspector: Option<Vec<PathBuf>>,
+    path_inspector: Option<PathInspector>,
     status: Option<String>,
     playback: Option<Playback>,
     conversion_queue: Vec<PathBuf>,
@@ -380,9 +387,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     continue;
                 }
                 if app.path_inspector.is_some() {
-                    if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i')) {
-                        app.path_inspector = None;
-                    }
+                    app.handle_path_inspector_key(key.code);
                     continue;
                 }
                 if app.conversion_progress.is_some() {
@@ -776,7 +781,42 @@ impl App {
             self.status = Some("Select an album or track to inspect its file path".into());
             return;
         };
-        self.path_inspector = Some(tracks.into_iter().map(|track| track.path).collect());
+        self.path_inspector = Some(PathInspector {
+            paths: tracks.into_iter().map(|track| track.path).collect(),
+            selected: 0,
+            horizontal_offset: 0,
+        });
+    }
+
+    fn handle_path_inspector_key(&mut self, key: KeyCode) {
+        let inspector = self
+            .path_inspector
+            .as_mut()
+            .expect("a path inspector is active while it is navigated");
+        match key {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i') => self.path_inspector = None,
+            KeyCode::Down | KeyCode::Char('j') => {
+                inspector.selected = (inspector.selected + 1).min(inspector.paths.len() - 1);
+                inspector.horizontal_offset = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                inspector.selected = inspector.selected.saturating_sub(1);
+                inspector.horizontal_offset = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let path_length = inspector.paths[inspector.selected]
+                    .display()
+                    .to_string()
+                    .chars()
+                    .count();
+                inspector.horizontal_offset =
+                    (inspector.horizontal_offset + 8).min(path_length.saturating_sub(1));
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                inspector.horizontal_offset = inspector.horizontal_offset.saturating_sub(8);
+            }
+            _ => {}
+        }
     }
 
     fn rename_selected(&mut self) {
@@ -1147,6 +1187,7 @@ impl App {
                             .and_then(|track| track.release_date.as_ref())
                             .map_or(0, String::len),
                     ],
+                    validation_error: None,
                 }
             }
             LibraryRow::FolderAlbum(album_index) => {
@@ -1172,6 +1213,7 @@ impl App {
                             .and_then(|track| track.release_date.as_ref())
                             .map_or(0, String::len),
                     ],
+                    validation_error: None,
                 }
             }
             LibraryRow::FolderGroup(_) => {
@@ -1202,6 +1244,7 @@ impl App {
                         track.album.len(),
                         track.release_date.as_ref().map_or(0, String::len),
                     ],
+                    validation_error: None,
                 }
             }
         };
@@ -1216,9 +1259,18 @@ impl App {
         }
         let editor = self.editor.as_mut().expect("editor is active");
         match key {
-            KeyCode::Char(character) => editor.insert(character),
-            KeyCode::Backspace => editor.backspace(),
-            KeyCode::Delete => editor.delete(),
+            KeyCode::Char(character) => {
+                editor.insert(character);
+                editor.validation_error = None;
+            }
+            KeyCode::Backspace => {
+                editor.backspace();
+                editor.validation_error = None;
+            }
+            KeyCode::Delete => {
+                editor.delete();
+                editor.validation_error = None;
+            }
             KeyCode::Left => editor.move_cursor_left(),
             KeyCode::Right => editor.move_cursor_right(),
             KeyCode::Tab | KeyCode::Down => editor.move_focus(1),
@@ -1229,8 +1281,11 @@ impl App {
     }
 
     fn save_editor(&mut self) {
-        let editor = self.editor.take().expect("editor is active");
+        let mut editor = self.editor.take().expect("editor is active");
         if !library::is_valid_release_date(editor.release_date()) {
+            editor.active_field = editor.values.len() - 1;
+            editor.validation_error =
+                Some("Could not save: release date must use YYYY, YYYY-MM, or YYYY-MM-DD.".into());
             self.editor = Some(editor);
             return;
         }
@@ -2260,13 +2315,6 @@ fn render_delete_confirmation(
 
 fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
     let width = 70.min(frame.area().width.saturating_sub(4));
-    let height = 9.min(frame.area().height.saturating_sub(4));
-    let popup = ratatui::layout::Rect {
-        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
-        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
     let date_is_valid = library::is_valid_release_date(editor.release_date());
     let mut lines = vec![
         Line::raw("←/→ move cursor · Tab/↑/↓ switch field · Enter save · Esc cancel"),
@@ -2285,13 +2333,25 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
         };
         lines.push(Line::styled(format!("{marker} {label}: {value}"), style));
     }
-    if !date_is_valid {
+    if let Some(error) = &editor.validation_error {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(error, Style::default().fg(DANGER)));
+    } else if !date_is_valid {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Invalid date — use YYYY, YYYY-MM, or YYYY-MM-DD. Enter is disabled.",
             Style::default().fg(DANGER),
         ));
     }
+    let height = (lines.len() as u16 + 2)
+        .min(frame.area().height.saturating_sub(4))
+        .max(5);
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(
@@ -2452,41 +2512,97 @@ fn sanitized_file_stem(title: &str) -> String {
     }
 }
 
-fn render_path_inspector(frame: &mut Frame, paths: &[PathBuf]) {
+fn render_path_inspector(frame: &mut Frame, inspector: &PathInspector) {
     let width = 100.min(frame.area().width.saturating_sub(4));
-    let requested_height = paths.len() as u16 + 4;
-    let height = requested_height
-        .min(frame.area().height.saturating_sub(4))
-        .max(5);
+    let available_height = frame.area().height.saturating_sub(4);
+    let visible_capacity = available_height.saturating_sub(5).max(1) as usize;
+    let start = inspector
+        .selected
+        .saturating_sub(visible_capacity.saturating_sub(1))
+        .min(inspector.paths.len().saturating_sub(visible_capacity));
+    let visible_paths = inspector
+        .paths
+        .len()
+        .saturating_sub(start)
+        .min(visible_capacity);
+    let height = (visible_paths as u16 + 5).min(available_height).max(5);
     let popup = ratatui::layout::Rect {
         x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
         y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
         width,
         height,
     };
-    let visible_paths = if requested_height > height {
-        paths.len().min(height.saturating_sub(5) as usize)
-    } else {
-        paths.len()
-    };
-    let mut lines: Vec<_> = paths
-        .iter()
-        .take(visible_paths)
-        .map(|path| Line::raw(path.display().to_string()))
-        .collect();
-    if visible_paths < paths.len() {
-        lines.push(Line::raw(format!(
-            "… and {} more",
-            paths.len() - visible_paths
-        )));
-    }
+    let path_width = width.saturating_sub(5);
+    let mut lines = vec![Line::raw(format!(
+        "Showing {}–{} of {} paths",
+        start + 1,
+        start + visible_paths,
+        inspector.paths.len()
+    ))];
+    lines.extend(
+        inspector
+            .paths
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible_paths)
+            .map(|(index, path)| {
+                let marker = if index == inspector.selected {
+                    "› "
+                } else {
+                    "  "
+                };
+                let offset = if index == inspector.selected {
+                    inspector.horizontal_offset
+                } else {
+                    0
+                };
+                Line::raw(format!(
+                    "{marker}{}",
+                    horizontal_path_view(&path.display().to_string(), offset, path_width)
+                ))
+            }),
+    );
     lines.push(Line::raw(""));
-    lines.push(Line::raw("Esc, Enter, or i to close"));
+    lines.push(Line::raw(
+        "↑/k ↓/j select · ←/h →/l scroll path · Esc, Enter, or i close",
+    ));
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" File paths ")),
         popup,
     );
+}
+
+fn horizontal_path_view(path: &str, offset: usize, max_width: u16) -> String {
+    let characters: Vec<_> = path.chars().collect();
+    let start = offset.min(characters.len());
+    let mut result = if start > 0 {
+        "…".to_string()
+    } else {
+        String::new()
+    };
+    let mut used = Line::raw(&result).width();
+    for (index, character) in characters.iter().enumerate().skip(start) {
+        let character_width = Line::raw(character.to_string()).width();
+        let has_more = index + 1 < characters.len();
+        let suffix_width = usize::from(has_more);
+        if used + character_width + suffix_width > max_width as usize {
+            break;
+        }
+        result.push(*character);
+        used += character_width;
+    }
+    let shown_characters = result
+        .chars()
+        .count()
+        .saturating_sub(usize::from(start > 0));
+    if start + shown_characters < characters.len()
+        && Line::raw(&result).width() < max_width as usize
+    {
+        result.push('…');
+    }
+    result
 }
 
 fn render_conversion_progress(frame: &mut Frame, progress: &ConversionProgress) {
@@ -2947,12 +3063,14 @@ mod tests {
             values: Vec::new(),
             active_field: 0,
             cursor_positions: Vec::new(),
+            validation_error: None,
         };
         let track_editor = MetadataEditor {
             target: EditorTarget::Track { album: 0, track: 0 },
             values: Vec::new(),
             active_field: 0,
             cursor_positions: Vec::new(),
+            validation_error: None,
         };
         assert_eq!(
             album_editor.labels(),
@@ -2971,6 +3089,7 @@ mod tests {
             values: vec!["Beyoncé".into()],
             active_field: 0,
             cursor_positions: vec!["Beyoncé".len()],
+            validation_error: None,
         };
 
         editor.move_cursor_left();
@@ -3109,6 +3228,52 @@ mod tests {
 
         app.handle_help_key(KeyCode::Esc);
         assert_eq!(app.help, None);
+    }
+
+    #[test]
+    fn path_inspector_navigates_paths_and_horizontal_overflow() {
+        let mut app = App::from_tracks(PathBuf::new(), Vec::new(), 0);
+        app.path_inspector = Some(PathInspector {
+            paths: vec![
+                PathBuf::from("/library/first/very-long-track-name.flac"),
+                PathBuf::from("/library/second/another-long-track-name.flac"),
+            ],
+            selected: 0,
+            horizontal_offset: 0,
+        });
+
+        app.handle_path_inspector_key(KeyCode::Right);
+        assert_eq!(app.path_inspector.as_ref().unwrap().horizontal_offset, 8);
+
+        app.handle_path_inspector_key(KeyCode::Down);
+        let inspector = app.path_inspector.as_ref().unwrap();
+        assert_eq!(inspector.selected, 1);
+        assert_eq!(inspector.horizontal_offset, 0);
+
+        app.handle_path_inspector_key(KeyCode::Esc);
+        assert!(app.path_inspector.is_none());
+    }
+
+    #[test]
+    fn invalid_metadata_save_focuses_release_date_and_explains_the_problem() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![track("Song", "Artist", "Artist", "Album", 1)],
+            0,
+        );
+        app.open_editor();
+        let editor = app.editor.as_mut().unwrap();
+        editor.values[2] = "2024-13".into();
+        editor.active_field = 0;
+
+        app.save_editor();
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.active_field, 2);
+        assert_eq!(
+            editor.validation_error.as_deref(),
+            Some("Could not save: release date must use YYYY, YYYY-MM, or YYYY-MM-DD.")
+        );
     }
 
     #[test]
