@@ -1361,7 +1361,9 @@ impl App {
                 .filter(|(_, album)| self.album_matches(album))
                 .flat_map(|(album_index, album)| {
                     let mut rows = vec![LibraryRow::Album(album_index)];
-                    if self.expanded_albums.contains(&album_index) {
+                    if self.expanded_albums.contains(&album_index)
+                        || self.album_has_matching_track_artist(album)
+                    {
                         rows.extend(
                             (0..album.tracks.len())
                                 .filter(|track| self.track_matches_filter(&album.tracks[*track]))
@@ -1386,7 +1388,7 @@ impl App {
                 })
                 .flat_map(|(group_index, group)| {
                     let mut rows = vec![LibraryRow::FolderGroup(group_index)];
-                    if self.expanded_folder_groups.contains(&group_index) {
+                    if self.expanded_folder_groups.contains(&group_index) || self.search.is_some() {
                         for album_index in group
                             .albums
                             .iter()
@@ -1394,7 +1396,11 @@ impl App {
                             .filter(|album| self.album_matches(&self.folder_albums[*album]))
                         {
                             rows.push(LibraryRow::FolderAlbum(album_index));
-                            if self.expanded_albums.contains(&album_index) {
+                            if self.expanded_albums.contains(&album_index)
+                                || self.album_has_matching_track_artist(
+                                    &self.folder_albums[album_index],
+                                )
+                            {
                                 rows.extend(
                                     (0..self.folder_albums[album_index].tracks.len())
                                         .filter(|track| {
@@ -1420,16 +1426,22 @@ impl App {
         let Some(search) = &self.search else {
             return true;
         };
-        album.title.to_lowercase().contains(search)
-            || album.artist.to_lowercase().contains(search)
+        search_matches(search, &album.title)
+            || search_matches(search, &album.artist)
             || album
                 .group
                 .as_ref()
-                .is_some_and(|group| group.to_lowercase().contains(search))
-            || album
+                .is_some_and(|group| search_matches(search, group))
+            || self.album_has_matching_track_artist(album)
+    }
+
+    fn album_has_matching_track_artist(&self, album: &Album) -> bool {
+        self.search.as_ref().is_some_and(|search| {
+            album
                 .tracks
                 .iter()
-                .any(|track| track.artist.to_lowercase().contains(search))
+                .any(|track| search_matches(search, &track.artist))
+        })
     }
 
     fn album_matches(&self, album: &Album) -> bool {
@@ -1535,6 +1547,21 @@ impl App {
         self.state
             .selected()
             .and_then(|selected| self.visible_rows().get(selected).copied())
+    }
+}
+
+fn search_matches(search: &str, value: &str) -> bool {
+    value.to_lowercase().contains(search)
+}
+
+fn search_match_style(matches: bool) -> Style {
+    if matches {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightYellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
     }
 }
 
@@ -1832,16 +1859,21 @@ fn render(frame: &mut Frame, app: &mut App) {
     let expanded_albums = &app.expanded_albums;
     let expanded_folder_groups = &app.expanded_folder_groups;
     let queued_paths = &app.conversion_queue;
+    let search = app.search.clone();
     let rows = visible_rows.into_iter().map(|row| match row {
         LibraryRow::FolderGroup(group_index) => {
             let group = &folder_groups[group_index];
-            let marker = if expanded_folder_groups.contains(&group_index) {
+            let group_matches = search
+                .as_deref()
+                .is_some_and(|search| search_matches(search, &group.title));
+            let marker = if expanded_folder_groups.contains(&group_index) || search.is_some() {
                 "▼"
             } else {
                 "▶"
             };
             Row::new([
-                Cell::from(format!("{marker} {}", group.title)),
+                Cell::from(format!("{marker} {}", group.title))
+                    .style(search_match_style(group_matches)),
                 Cell::from(""),
                 Cell::from(format!("{} albums", group.albums.len())),
                 Cell::from(""),
@@ -1857,14 +1889,27 @@ fn render(frame: &mut Frame, app: &mut App) {
         }
         LibraryRow::Album(album_index) | LibraryRow::FolderAlbum(album_index) => {
             let album = &albums[album_index];
-            let marker = if expanded_albums.contains(&album_index) {
+            let title_matches = search
+                .as_deref()
+                .is_some_and(|search| search_matches(search, &album.title));
+            let artist_matches = search
+                .as_deref()
+                .is_some_and(|search| search_matches(search, &album.artist));
+            let has_matching_track_artist = search.as_deref().is_some_and(|search| {
+                album
+                    .tracks
+                    .iter()
+                    .any(|track| search_matches(search, &track.artist))
+            });
+            let marker = if expanded_albums.contains(&album_index) || has_matching_track_artist {
                 "▼"
             } else {
                 "▶"
             };
             Row::new([
-                Cell::from(format!("{marker} {}", album.title)),
-                Cell::from(album.artist.clone()),
+                Cell::from(format!("{marker} {}", album.title))
+                    .style(search_match_style(title_matches)),
+                Cell::from(album.artist.clone()).style(search_match_style(artist_matches)),
                 Cell::from(match view_mode {
                     ViewMode::AlbumMetadata => format!("{} tracks", album.tracks.len()),
                     ViewMode::Folders => format!("{} tracks", album.tracks.len()),
@@ -1896,6 +1941,9 @@ fn render(frame: &mut Frame, app: &mut App) {
         LibraryRow::Track { album, track } => {
             let track = &albums[album].tracks[track];
             let is_queued = queued_paths.contains(&track.path);
+            let artist_matches = search
+                .as_deref()
+                .is_some_and(|search| search_matches(search, &track.artist));
             let queue_indicator = if is_queued { "[Q] " } else { "    " };
             let playing_indicator = if let Some((playing_path, started_at)) = &playback {
                 if playing_path == &track.path {
@@ -1922,7 +1970,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                 } else {
                     Style::default()
                 }),
-                Cell::from(track.artist.clone()),
+                Cell::from(track.artist.clone()).style(search_match_style(artist_matches)),
                 Cell::from(""),
                 Cell::from(
                     track
@@ -2792,6 +2840,15 @@ mod tests {
         );
         let mut app = app;
         app.search = Some("eminem".into());
+        assert_eq!(
+            app.visible_rows(),
+            vec![
+                LibraryRow::Album(0),
+                LibraryRow::Track { album: 0, track: 0 }
+            ]
+        );
+
+        app.clear_search();
         assert_eq!(app.visible_rows(), vec![LibraryRow::Album(0)]);
     }
 
