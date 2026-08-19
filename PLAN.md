@@ -32,5 +32,5 @@
 - [x] Make the header responsive so path, playback, queue, and filter state remain readable in narrow terminals.
 - [x] Clarify table semantics: use a `Tracks` column for album counts and remove or repurpose redundant album-format cells.
 - [x] Add a `?` help overlay and keep it as the single source of truth for in-app controls and README documentation.
-- [ ] Apply a terminal-theme-resilient visual system with explicit state labels/markers, sufficient selection contrast, and color as secondary meaning.
+- [x] Apply a terminal-theme-resilient visual system with explicit state labels/markers, sufficient selection contrast, and color as secondary meaning.
 - [ ] Make long path/result dialogs navigable, and make blocked metadata saves immediately explain which field needs attention.

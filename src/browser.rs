@@ -85,6 +85,13 @@ const HELP_CONTROLS: [(&str, &str); 17] = [
     ("q", "Quit"),
 ];
 
+const ACCENT: Color = Color::Cyan;
+const STRUCTURE: Color = Color::LightBlue;
+const EMPHASIS: Color = Color::LightYellow;
+const SUCCESS: Color = Color::Green;
+const WARNING: Color = Color::Yellow;
+const DANGER: Color = Color::Red;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LibraryRow {
     Album(usize),
@@ -1558,7 +1565,7 @@ fn search_match_style(matches: bool) -> Style {
     if matches {
         Style::default()
             .fg(Color::Black)
-            .bg(Color::LightYellow)
+            .bg(EMPHASIS)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -1798,16 +1805,10 @@ fn render(frame: &mut Frame, app: &mut App) {
         let pulse_is_bright = (app.started_at.elapsed().as_millis() / 650).is_multiple_of(2);
         Style::default()
             .fg(Color::Black)
-            .bg(if pulse_is_bright {
-                Color::Yellow
-            } else {
-                Color::LightYellow
-            })
+            .bg(if pulse_is_bright { WARNING } else { EMPHASIS })
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
     };
     header_lines.extend(
         wrap_header_tokens(state_tokens, content_width)
@@ -1841,11 +1842,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             "Size",
         ],
     })
-    .style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
+    .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
     let visible_rows = app.visible_rows();
     let playback = app
         .playback
@@ -1872,7 +1869,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                 "▶"
             };
             Row::new([
-                Cell::from(format!("{marker} {}", group.title))
+                Cell::from(format!("{marker} [FOLDER] {}", group.title))
                     .style(search_match_style(group_matches)),
                 Cell::from(""),
                 Cell::from(format!("{} albums", group.albums.len())),
@@ -1881,11 +1878,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(""),
                 Cell::from(""),
             ])
-            .style(
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(Style::default().fg(STRUCTURE).add_modifier(Modifier::BOLD))
         }
         LibraryRow::Album(album_index) | LibraryRow::FolderAlbum(album_index) => {
             let album = &albums[album_index];
@@ -1907,7 +1900,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                 "▶"
             };
             Row::new([
-                Cell::from(format!("{marker} {}", album.title))
+                Cell::from(format!("{marker} [ALBUM] {}", album.title))
                     .style(search_match_style(title_matches)),
                 Cell::from(album.artist.clone()).style(search_match_style(artist_matches)),
                 Cell::from(match view_mode {
@@ -1932,11 +1925,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                     album.tracks.iter().map(|track| track.bytes).sum(),
                 )),
             ])
-            .style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(Style::default().fg(EMPHASIS).add_modifier(Modifier::BOLD))
         }
         LibraryRow::Track { album, track } => {
             let track = &albums[album].tracks[track];
@@ -1964,9 +1953,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                     track.title
                 ))
                 .style(if is_queued {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 }),
@@ -2013,9 +2000,10 @@ fn render(frame: &mut Frame, app: &mut App) {
     .block(Block::default().borders(Borders::ALL).title(" Library "))
     .row_highlight_style(
         Style::default()
-            .bg(Color::DarkGray)
+            .add_modifier(Modifier::REVERSED)
             .add_modifier(Modifier::BOLD),
-    );
+    )
+    .highlight_symbol("› ");
     frame.render_stateful_widget(table, table_area, &mut app.state);
 
     let footer_text = if let Some(input) = &app.search_input {
@@ -2117,7 +2105,7 @@ fn render_filter_menu(frame: &mut Frame, selected: usize) {
         let style = if index == selected {
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -2291,7 +2279,7 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
             " "
         };
         let style = if *label == "Release date" && !date_is_valid {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -2301,7 +2289,7 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Invalid date — use YYYY, YYYY-MM, or YYYY-MM-DD. Enter is disabled.",
-            Style::default().fg(Color::Red),
+            Style::default().fg(DANGER),
         ));
     }
     frame.render_widget(Clear, popup);
@@ -2523,9 +2511,7 @@ fn render_conversion_progress(frame: &mut Frame, progress: &ConversionProgress) 
     let lines = vec![
         Line::styled(
             format!("{spinner} Converting: {current}"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
         Line::raw(format!(
@@ -2534,11 +2520,11 @@ fn render_conversion_progress(frame: &mut Frame, progress: &ConversionProgress) 
         )),
         Line::styled(
             format!("Successful: {}", progress.successful),
-            Style::default().fg(Color::Green),
+            Style::default().fg(SUCCESS),
         ),
         Line::styled(
             format!("Unsuccessful: {}", progress.unsuccessful),
-            Style::default().fg(Color::Red),
+            Style::default().fg(DANGER),
         ),
         Line::raw(format!("Remaining: {remaining}")),
     ];
