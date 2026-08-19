@@ -17,6 +17,7 @@
   - Edit fields have a blinking cursor; use `←` and `→` to insert, backspace, or delete text in place.
 - Rename a selected track or all tracks in a selected album to `NN_Title.ext`, preserving their audio-file extension.
 - Inspect the full file path for a selected track or album before renaming.
+- Compare selected album metadata with a read-only MusicBrainz lookup before changing any tags.
 - Play a selected track with an animated playback indicator and scrolling now-playing title.
 - Switch to a filesystem-oriented folder view, expanding top-level grouping folders into their albums and tracks.
 - Exclude configured folders before scanning or reading metadata.
@@ -33,6 +34,7 @@
 | `Space` | Play or stop selected track |
 | `e` | Edit selected album or track metadata |
 | `i` | Show selected file path(s) |
+| `m` | Compare selected album metadata with MusicBrainz |
 | `r` | Review and rename selected track(s) |
 | `v` | Toggle album-metadata and folder views |
 | `f` | Choose a track filter |

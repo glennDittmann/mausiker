@@ -1,6 +1,7 @@
 mod browser;
 mod conversion;
 mod library;
+mod musicbrainz;
 
 use std::{env, path::PathBuf};
 

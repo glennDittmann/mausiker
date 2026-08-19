@@ -24,6 +24,7 @@ use ratatui::{
 use crate::{
     conversion::{self, CompletedConversion},
     library::{self, Track},
+    musicbrainz::{self, AlbumMatch},
 };
 
 #[derive(Debug)]
@@ -62,7 +63,7 @@ impl TrackFilter {
     }
 }
 
-const HELP_CONTROLS: [(&str, &str); 17] = [
+const HELP_CONTROLS: [(&str, &str); 18] = [
     ("j / ↓ · k / ↑", "Move selection"),
     ("Enter", "Toggle selected album or folder"),
     ("→ / l", "Expand selected album or folder"),
@@ -70,6 +71,7 @@ const HELP_CONTROLS: [(&str, &str); 17] = [
     ("Space", "Play or stop selected track"),
     ("e", "Edit selected album or track metadata"),
     ("i", "Show selected file path(s)"),
+    ("m", "Compare selected album metadata with MusicBrainz"),
     ("r", "Review and rename selected track(s)"),
     ("v", "Toggle album-metadata and folder views"),
     ("f", "Choose a track filter"),
@@ -90,7 +92,7 @@ const STRUCTURE: Color = Color::LightBlue;
 const EMPHASIS: Color = Color::LightYellow;
 const SUCCESS: Color = Color::Green;
 const WARNING: Color = Color::Yellow;
-const DANGER: Color = Color::Red;
+const DANGER: Color = Color::Rgb(255, 105, 180);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LibraryRow {
@@ -124,6 +126,26 @@ struct PathInspector {
     paths: Vec<PathBuf>,
     selected: usize,
     horizontal_offset: usize,
+}
+
+#[derive(Clone)]
+struct LocalAlbumMetadata {
+    title: String,
+    artist: String,
+    release_date: Option<String>,
+    track_count: usize,
+}
+
+enum MusicBrainzComparison {
+    Loading(LocalAlbumMetadata),
+    Ready {
+        local: LocalAlbumMetadata,
+        remote: Option<AlbumMatch>,
+    },
+    Failed {
+        local: LocalAlbumMetadata,
+        error: String,
+    },
 }
 
 struct Playback {
@@ -321,6 +343,9 @@ struct App {
     search_input: Option<String>,
     editor: Option<MetadataEditor>,
     path_inspector: Option<PathInspector>,
+    musicbrainz_comparison: Option<MusicBrainzComparison>,
+    musicbrainz_receiver: Option<Receiver<Result<Option<AlbumMatch>, String>>>,
+    musicbrainz_last_request: Option<Instant>,
     status: Option<String>,
     playback: Option<Playback>,
     conversion_queue: Vec<PathBuf>,
@@ -346,6 +371,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
         loop {
             app.refresh_playback();
             app.refresh_conversion();
+            app.refresh_musicbrainz_comparison();
             terminal.draw(|frame| render(frame, &mut app))?;
             if !event::poll(Duration::from_millis(200))? {
                 continue;
@@ -390,6 +416,12 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     app.handle_path_inspector_key(key.code);
                     continue;
                 }
+                if app.musicbrainz_comparison.is_some() {
+                    if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('m')) {
+                        app.musicbrainz_comparison = None;
+                    }
+                    continue;
+                }
                 if app.conversion_progress.is_some() {
                     continue;
                 }
@@ -410,6 +442,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     }
                     KeyCode::Char('r') => app.rename_selected(),
                     KeyCode::Char('i') => app.open_path_inspector(),
+                    KeyCode::Char('m') => app.open_musicbrainz_comparison(),
                     KeyCode::Char('v') => app.toggle_view(),
                     KeyCode::Char('f') => app.open_filter_menu(),
                     KeyCode::Char('c') => app.enqueue_selected(),
@@ -458,6 +491,9 @@ impl App {
             search_input: None,
             editor: None,
             path_inspector: None,
+            musicbrainz_comparison: None,
+            musicbrainz_receiver: None,
+            musicbrainz_last_request: None,
             status: None,
             playback: None,
             conversion_queue: Vec::new(),
@@ -785,6 +821,69 @@ impl App {
             paths: tracks.into_iter().map(|track| track.path).collect(),
             selected: 0,
             horizontal_offset: 0,
+        });
+    }
+
+    fn open_musicbrainz_comparison(&mut self) {
+        let Some(local) = self.selected_local_album_metadata() else {
+            self.status =
+                Some("Select an album or track to compare its metadata with MusicBrainz".into());
+            return;
+        };
+        let delay = self
+            .musicbrainz_last_request
+            .and_then(|last_request| Duration::from_secs(1).checked_sub(last_request.elapsed()));
+        self.musicbrainz_last_request = Some(Instant::now());
+        let (sender, receiver) = mpsc::channel();
+        let title = local.title.clone();
+        let artist = local.artist.clone();
+        thread::spawn(move || {
+            if let Some(delay) = delay {
+                thread::sleep(delay);
+            }
+            let _ = sender.send(musicbrainz::find_album(&title, &artist));
+        });
+        self.status = None;
+        self.musicbrainz_comparison = Some(MusicBrainzComparison::Loading(local));
+        self.musicbrainz_receiver = Some(receiver);
+    }
+
+    fn selected_local_album_metadata(&self) -> Option<LocalAlbumMetadata> {
+        let album = match self.selected_row()? {
+            LibraryRow::Album(index) => &self.active_albums()[index],
+            LibraryRow::FolderAlbum(index) => &self.folder_albums[index],
+            LibraryRow::Track { album, .. } => &self.active_albums()[album],
+            LibraryRow::FolderGroup(_) => return None,
+        };
+        Some(LocalAlbumMetadata {
+            title: album.title.clone(),
+            artist: album.artist.clone(),
+            release_date: album
+                .tracks
+                .first()
+                .and_then(|track| track.release_date.clone()),
+            track_count: album.tracks.len(),
+        })
+    }
+
+    fn refresh_musicbrainz_comparison(&mut self) {
+        let Some(receiver) = &self.musicbrainz_receiver else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                Err("MusicBrainz lookup stopped unexpectedly".into())
+            }
+        };
+        self.musicbrainz_receiver = None;
+        let Some(MusicBrainzComparison::Loading(local)) = self.musicbrainz_comparison.take() else {
+            return;
+        };
+        self.musicbrainz_comparison = Some(match result {
+            Ok(remote) => MusicBrainzComparison::Ready { local, remote },
+            Err(error) => MusicBrainzComparison::Failed { local, error },
         });
     }
 
@@ -2070,7 +2169,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     } else if let Some(status) = &app.status {
         format!("{status} · c queue · C convert · d delete originals · q quit")
     } else {
-        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · i path · r rename · f filter · c queue · C convert · d delete · v view · Ctrl-K search · ? help · q quit"
+        "↑/k ↓/j select · Enter toggle · Space play/stop · e edit · i path · m MusicBrainz · r rename · f filter · c queue · C convert · d delete · v view · Ctrl-K search · ? help · q quit"
             .into()
     };
     frame.render_widget(
@@ -2083,6 +2182,9 @@ fn render(frame: &mut Frame, app: &mut App) {
     }
     if let Some(paths) = &app.path_inspector {
         render_path_inspector(frame, paths);
+    }
+    if let Some(comparison) = &app.musicbrainz_comparison {
+        render_musicbrainz_comparison(frame, comparison);
     }
     if let Some(progress) = &app.conversion_progress {
         render_conversion_progress(frame, progress);
@@ -2105,6 +2207,162 @@ fn render(frame: &mut Frame, app: &mut App) {
     if let Some(scroll) = app.help {
         render_help(frame, scroll);
     }
+}
+
+fn overlay_block(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+        .title(title.to_owned())
+}
+
+fn render_musicbrainz_comparison(frame: &mut Frame, comparison: &MusicBrainzComparison) {
+    let width = 112.min(frame.area().width.saturating_sub(4));
+    let height = 13.min(frame.area().height.saturating_sub(4)).max(7);
+    let popup = ratatui::layout::Rect {
+        x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let (local, remote_title, remote_lines, summary) = match comparison {
+        MusicBrainzComparison::Loading(local) => (
+            local,
+            " MusicBrainz ",
+            vec![Line::styled(
+                "Searching MusicBrainz…",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )],
+            "Read-only comparison · searching the best album match".into(),
+        ),
+        MusicBrainzComparison::Ready {
+            local,
+            remote: Some(remote),
+        } => (
+            local,
+            " MusicBrainz match ",
+            remote_metadata_lines(remote),
+            format!(
+                "Read-only comparison · best MusicBrainz match{}",
+                remote
+                    .score
+                    .map(|score| format!(" ({score}% search score)"))
+                    .unwrap_or_default()
+            ),
+        ),
+        MusicBrainzComparison::Ready {
+            local,
+            remote: None,
+        } => (
+            local,
+            " MusicBrainz ",
+            vec![Line::styled(
+                "No matching release found.",
+                Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
+            )],
+            "Read-only comparison · no release matched the local album and artist".into(),
+        ),
+        MusicBrainzComparison::Failed { local, error } => (
+            local,
+            " MusicBrainz ",
+            vec![Line::styled(error, Style::default().fg(DANGER))],
+            "Read-only comparison · lookup could not be completed".into(),
+        ),
+    };
+    let outer = overlay_block(" MusicBrainz album comparison ");
+    let inner = outer.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(outer, popup);
+    let [summary_area, comparison_area, footer_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            truncate_to_width(&summary, summary_area.width as usize),
+            Style::default().fg(EMPHASIS),
+        )),
+        summary_area,
+    );
+    let [local_area, remote_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .areas(comparison_area);
+    frame.render_widget(
+        Paragraph::new(local_metadata_lines(local)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(STRUCTURE))
+                .title(" Local file tags "),
+        ),
+        local_area,
+    );
+    frame.render_widget(
+        Paragraph::new(remote_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT))
+                .title(remote_title),
+        ),
+        remote_area,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "Esc, Enter, or m to close · MusicBrainz data is never written automatically",
+        ),
+        footer_area,
+    );
+}
+
+fn local_metadata_lines(local: &LocalAlbumMetadata) -> Vec<Line<'static>> {
+    metadata_lines(vec![
+        ("Album", local.title.clone()),
+        ("Artist", local.artist.clone()),
+        (
+            "Release date",
+            local.release_date.clone().unwrap_or_else(|| "—".into()),
+        ),
+        ("Tracks", local.track_count.to_string()),
+    ])
+}
+
+fn remote_metadata_lines(remote: &AlbumMatch) -> Vec<Line<'static>> {
+    metadata_lines(vec![
+        ("Album", remote.title.clone()),
+        ("Artist", remote.artist.clone()),
+        (
+            "Release date",
+            remote.release_date.clone().unwrap_or_else(|| "—".into()),
+        ),
+        (
+            "Tracks",
+            remote
+                .track_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "—".into()),
+        ),
+        (
+            "Country",
+            remote.country.clone().unwrap_or_else(|| "—".into()),
+        ),
+        (
+            "Format",
+            remote.format.clone().unwrap_or_else(|| "—".into()),
+        ),
+    ])
+}
+
+fn metadata_lines(values: Vec<(&str, String)>) -> Vec<Line<'static>> {
+    values
+        .into_iter()
+        .map(|(label, value)| {
+            Line::styled(
+                format!("{label:<13}{value}"),
+                Style::default().fg(Color::White),
+            )
+        })
+        .collect()
 }
 
 fn render_help(frame: &mut Frame, scroll: usize) {
@@ -2139,10 +2397,7 @@ fn render_help(frame: &mut Frame, scroll: usize) {
     lines.push(Line::raw(""));
     lines.push(Line::raw("↑/k ↓/j scroll · ?, Enter, or Esc close"));
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Help ")),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(lines).block(overlay_block(" Help ")), popup);
 }
 
 fn render_filter_menu(frame: &mut Frame, selected: usize) {
@@ -2176,7 +2431,7 @@ fn render_filter_menu(frame: &mut Frame, selected: usize) {
     ));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Filter ")),
+        Paragraph::new(lines).block(overlay_block(" Filter ")),
         popup,
     );
 }
@@ -2253,11 +2508,7 @@ fn render_rename_confirmation(frame: &mut Frame, preview: &RenamePreview) {
     ));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Review rename "),
-        ),
+        Paragraph::new(lines).block(overlay_block(" Review rename ")),
         popup,
     );
 }
@@ -2304,11 +2555,7 @@ fn render_delete_confirmation(
     ));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Review original-file deletion "),
-        ),
+        Paragraph::new(lines).block(overlay_block(" Review original-file deletion ")),
         popup,
     );
 }
@@ -2354,11 +2601,7 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Edit metadata "),
-        ),
+        Paragraph::new(lines).block(overlay_block(" Edit metadata ")),
         popup,
     );
     let active_label = editor.labels()[editor.active_field];
@@ -2569,7 +2812,7 @@ fn render_path_inspector(frame: &mut Frame, inspector: &PathInspector) {
     ));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" File paths ")),
+        Paragraph::new(lines).block(overlay_block(" File paths ")),
         popup,
     );
 }
@@ -2646,11 +2889,7 @@ fn render_conversion_progress(frame: &mut Frame, progress: &ConversionProgress) 
     ];
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Conversion progress "),
-        ),
+        Paragraph::new(lines).block(overlay_block(" Conversion progress ")),
         popup,
     );
 }
@@ -2727,11 +2966,7 @@ fn render_conversion_preview(frame: &mut Frame, preview: &ConversionPreview) {
     ));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Review M4A conversion "),
-        ),
+        Paragraph::new(lines).block(overlay_block(" Review M4A conversion ")),
         popup,
     );
 }
@@ -2785,11 +3020,7 @@ fn render_conversion_result(frame: &mut Frame, result: &ConversionResult) {
     lines.push(Line::raw("↑/k ↓/j review · Esc close"));
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Conversion results "),
-        ),
+        Paragraph::new(lines).block(overlay_block(" Conversion results ")),
         popup,
     );
 }
@@ -3252,6 +3483,20 @@ mod tests {
 
         app.handle_path_inspector_key(KeyCode::Esc);
         assert!(app.path_inspector.is_none());
+    }
+
+    #[test]
+    fn musicbrainz_comparison_uses_the_selected_albums_metadata() {
+        let mut track = track("Song", "Track Artist", "Album Artist", "Album", 1);
+        track.release_date = Some("1994".into());
+        let app = App::from_tracks(PathBuf::new(), vec![track], 0);
+
+        let local = app.selected_local_album_metadata().unwrap();
+
+        assert_eq!(local.title, "Album");
+        assert_eq!(local.artist, "Album Artist");
+        assert_eq!(local.release_date.as_deref(), Some("1994"));
+        assert_eq!(local.track_count, 1);
     }
 
     #[test]

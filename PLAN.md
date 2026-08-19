@@ -34,3 +34,7 @@
 - [x] Add a `?` help overlay and keep it as the single source of truth for in-app controls and README documentation.
 - [x] Apply a terminal-theme-resilient visual system with explicit state labels/markers, sufficient selection contrast, and color as secondary meaning.
 - [x] Make long path/result dialogs navigable, and make blocked metadata saves immediately explain which field needs attention.
+
+## MusicBrainz comparison
+
+- [x] Compare selected album metadata with the best read-only MusicBrainz release match.
