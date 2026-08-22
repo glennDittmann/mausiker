@@ -68,7 +68,7 @@ const HELP_CONTROLS: [(&str, &str); 18] = [
     ("Enter", "Toggle selected album or folder"),
     ("→ / l", "Expand selected album or folder"),
     ("← / h", "Collapse selected album or folder"),
-    ("Space", "Play or stop selected track"),
+    ("Space", "Play or stop the selected album's track list"),
     ("e", "Edit selected album or track metadata"),
     ("i", "Show selected file path(s)"),
     ("m", "Compare selected album metadata with MusicBrainz"),
@@ -153,6 +153,14 @@ struct Playback {
     title: String,
     child: Child,
     started_at: Instant,
+    queue: Vec<PlaybackTrack>,
+    next_track: usize,
+}
+
+#[derive(Clone)]
+struct PlaybackTrack {
+    path: PathBuf,
+    title: String,
 }
 
 struct ConversionProgress {
@@ -1458,42 +1466,61 @@ impl App {
             .as_mut()
             .is_some_and(|playback| playback.child.try_wait().ok().flatten().is_some());
         if finished {
-            self.playback = None;
-            self.status = Some("Playback finished".into());
+            self.play_next_track();
         }
     }
 
     fn toggle_playback_selected(&mut self) {
-        let Some(LibraryRow::Track { album, track }) = self.selected_row() else {
-            self.status = Some("Select a track to play it".into());
-            return;
-        };
-        let track = &self.active_albums()[album].tracks[track];
-        let path = track.path.clone();
-        let title = track.title.clone();
-        if self
-            .playback
-            .as_ref()
-            .is_some_and(|playback| playback.path == path)
-        {
+        if self.playback.is_some() {
             self.stop_playback();
             self.status = Some("Playback stopped".into());
             return;
         }
-
-        self.stop_playback();
-        match start_playback(&path) {
+        let Some(LibraryRow::Track { album, track }) = self.selected_row() else {
+            self.status = Some("Select a track to play it".into());
+            return;
+        };
+        let queue = playback_queue(&self.active_albums()[album].tracks, track);
+        let first_track = queue[0].clone();
+        let next_track = 1 % queue.len();
+        match start_playback(&first_track.path) {
             Ok(child) => {
                 self.playback = Some(Playback {
-                    path,
-                    title,
+                    path: first_track.path,
+                    title: first_track.title,
                     child,
                     started_at: Instant::now(),
+                    queue,
+                    next_track,
                 });
-                self.status = None;
+                self.status = Some("Playing album track list · Space stops".into());
             }
             Err(error) => self.status = Some(format!("Could not start playback: {error}")),
         }
+    }
+
+    fn play_next_track(&mut self) {
+        let mut playback = self
+            .playback
+            .take()
+            .expect("a playback queue is active when advancing it");
+        let mut failures = 0;
+        while failures < playback.queue.len() {
+            let track = playback.queue[playback.next_track].clone();
+            playback.next_track = (playback.next_track + 1) % playback.queue.len();
+            match start_playback(&track.path) {
+                Ok(child) => {
+                    playback.path = track.path;
+                    playback.title = track.title;
+                    playback.child = child;
+                    playback.started_at = Instant::now();
+                    self.playback = Some(playback);
+                    return;
+                }
+                Err(_) => failures += 1,
+            }
+        }
+        self.status = Some("Playback stopped: none of the remaining tracks could be played".into());
     }
 
     fn stop_playback(&mut self) {
@@ -3035,6 +3062,17 @@ fn start_playback(path: &Path) -> io::Result<Child> {
         .spawn()
 }
 
+fn playback_queue(tracks: &[Track], start: usize) -> Vec<PlaybackTrack> {
+    tracks[start..]
+        .iter()
+        .chain(&tracks[..start])
+        .map(|track| PlaybackTrack {
+            path: track.path.clone(),
+            title: track.title.clone(),
+        })
+        .collect()
+}
+
 fn animated_wave(elapsed: Duration) -> &'static str {
     const FRAMES: [&str; 4] = ["▁▃▅", "▃▅▃", "▅▃▁", "▃▁▃"];
     FRAMES[(elapsed.as_millis() / 160 % FRAMES.len() as u128) as usize]
@@ -3497,6 +3535,25 @@ mod tests {
         assert_eq!(local.artist, "Album Artist");
         assert_eq!(local.release_date.as_deref(), Some("1994"));
         assert_eq!(local.track_count, 1);
+    }
+
+    #[test]
+    fn playback_queue_starts_at_the_selected_track_and_wraps_the_album() {
+        let tracks = vec![
+            track("First", "Artist", "Artist", "Album", 1),
+            track("Second", "Artist", "Artist", "Album", 2),
+            track("Third", "Artist", "Artist", "Album", 3),
+        ];
+
+        let queue = playback_queue(&tracks, 1);
+
+        assert_eq!(
+            queue
+                .iter()
+                .map(|track| track.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Second", "Third", "First"]
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@
 - Rename a selected track or all tracks in a selected album to `NN_Title.ext`, preserving their audio-file extension.
 - Inspect the full file path for a selected track or album before renaming.
 - Compare selected album metadata with a read-only MusicBrainz lookup before changing any tags.
-- Play a selected track with an animated playback indicator and scrolling now-playing title.
+- Play the selected album's track list continuously from a chosen track, with an animated playback indicator and scrolling now-playing title.
 - Switch to a filesystem-oriented folder view, expanding top-level grouping folders into their albums and tracks.
 - Exclude configured folders before scanning or reading metadata.
 - Queue MP3, FLAC, WAV, and other non-M4A tracks for verified AAC/M4A conversion in a separate output library.
@@ -31,7 +31,7 @@
 | `Enter` | Toggle selected album or folder |
 | `→ / l` | Expand selected album or folder |
 | `← / h` | Collapse selected album or folder |
-| `Space` | Play or stop selected track |
+| `Space` | Play or stop the selected album's track list |
 | `e` | Edit selected album or track metadata |
 | `i` | Show selected file path(s) |
 | `m` | Compare selected album metadata with MusicBrainz |
