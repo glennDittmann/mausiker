@@ -5,6 +5,9 @@
 - [x] Edit track and album title/date metadata from the library browser
 - [x] Edit album artists without changing individual track artist credits
 - [x] Validate release-date input before saving metadata
+- [x] Read and edit genre metadata, with a `No genre` track filter
+- [x] Read, validate, and edit disc number, disc total, and disc subtitle metadata
+- [x] Show multi-disc albums as an album → disc → track hierarchy, with disc-level actions and editing
 - [x] UI refinement
   - [x] Group music by album, with expandable albums and drill-in navigation
   - [x] Group featured-artist tracks under the primary album artist
@@ -38,3 +41,13 @@
 ## MusicBrainz comparison
 
 - [x] Compare selected album metadata with the best read-only MusicBrainz release match.
+
+## Album artwork embedding
+
+- [ ] Detect whether each track already has embedded front-cover artwork and preserve it by default.
+- [ ] Resolve missing album artwork in a deterministic order: another track from the same album, then a local `cover`/`folder`/`front` JPEG or PNG, then an optional confirmed Cover Art Archive result.
+- [ ] Match albums using album artist, album title, and directory so similarly named releases cannot accidentally share artwork.
+- [ ] Show an album-level preview of the selected artwork, its source, affected tracks, and any skipped or ambiguous tracks before writing.
+- [ ] Embed one verified JPEG or PNG into every M4A track as standard `covr` metadata without re-encoding audio; reject unsupported or excessively large images.
+- [ ] Write changes to a same-directory partial file, reopen it to verify artwork and audio properties, and only then atomically publish it; never replace existing artwork without explicit confirmation.
+- [ ] Integrate artwork embedding into conversion before the existing output verification and final rename, and use the same safe temporary-copy workflow for existing M4A files.

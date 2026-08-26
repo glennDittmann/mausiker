@@ -20,10 +20,30 @@ pub struct Track {
     pub artist: String,
     pub album_artist: String,
     pub album: String,
+    pub genre: Option<String>,
     pub release_date: Option<String>,
     pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub disc_total: Option<u32>,
+    pub disc_subtitle: Option<String>,
     pub duration: Option<Duration>,
     pub bytes: u64,
+}
+
+pub struct DiscMetadataEdit<'a> {
+    pub number: Option<u32>,
+    pub total: Option<u32>,
+    pub subtitle: &'a str,
+}
+
+pub struct MetadataEdit<'a> {
+    pub title: Option<&'a str>,
+    pub artist: Option<&'a str>,
+    pub album_artist: Option<&'a str>,
+    pub album: &'a str,
+    pub genre: &'a str,
+    pub release_date: &'a str,
+    pub disc: Option<DiscMetadataEdit<'a>>,
 }
 
 pub fn scan(root: &Path) -> (Vec<Track>, usize) {
@@ -115,6 +135,10 @@ fn read_track(path: &Path) -> Result<Track, lofty::error::FileParseError> {
             .and_then(|tag| tag.album())
             .map(|value| value.into_owned())
             .unwrap_or_else(|| "Unknown album".into()),
+        genre: tag
+            .and_then(|tag| tag.genre())
+            .map(|value| value.into_owned())
+            .filter(|genre| !genre.trim().is_empty()),
         release_date: tag
             .and_then(|tag| {
                 tag.get_string(ItemKey::RecordingDate)
@@ -122,6 +146,12 @@ fn read_track(path: &Path) -> Result<Track, lofty::error::FileParseError> {
             })
             .map(ToOwned::to_owned),
         track_number: tag.and_then(|tag| tag.track()),
+        disc_number: tag.and_then(|tag| tag.disk()),
+        disc_total: tag.and_then(|tag| tag.disk_total()),
+        disc_subtitle: tag
+            .and_then(|tag| tag.get_string(ItemKey::SetSubtitle))
+            .map(ToOwned::to_owned)
+            .filter(|subtitle| !subtitle.trim().is_empty()),
         duration: Some(tagged_file.properties().duration()),
         bytes: fs::metadata(path)
             .map(|metadata| metadata.len())
@@ -129,33 +159,45 @@ fn read_track(path: &Path) -> Result<Track, lofty::error::FileParseError> {
     })
 }
 
-pub fn write_metadata(
-    path: &Path,
-    title: Option<&str>,
-    artist: Option<&str>,
-    album_artist: Option<&str>,
-    album: &str,
-    release_date: &str,
-) -> Result<(), String> {
+pub fn write_metadata(path: &Path, edit: MetadataEdit<'_>) -> Result<(), String> {
     let mut tagged_file = read_from_path(path).map_err(|error| error.to_string())?;
     let tag = tagged_file
         .primary_tag_mut()
         .ok_or_else(|| "the file has no writable primary tag".to_owned())?;
 
-    if let Some(title) = title {
+    if let Some(title) = edit.title {
         tag.set_title(title.to_owned());
     }
-    if let Some(artist) = artist {
+    if let Some(artist) = edit.artist {
         tag.set_artist(artist.to_owned());
     }
-    if let Some(album_artist) = album_artist {
+    if let Some(album_artist) = edit.album_artist {
         tag.insert_text(ItemKey::AlbumArtist, album_artist.to_owned());
     }
-    tag.set_album(album.to_owned());
+    tag.set_album(edit.album.to_owned());
+    if edit.genre.trim().is_empty() {
+        tag.remove_genre();
+    } else {
+        tag.set_genre(edit.genre.trim().to_owned());
+    }
     tag.remove_key(ItemKey::Year);
     tag.remove_key(ItemKey::RecordingDate);
-    if !release_date.trim().is_empty() {
-        tag.insert_text(ItemKey::RecordingDate, release_date.trim().to_owned());
+    if !edit.release_date.trim().is_empty() {
+        tag.insert_text(ItemKey::RecordingDate, edit.release_date.trim().to_owned());
+    }
+    if let Some(disc) = edit.disc {
+        match disc.number {
+            Some(number) => tag.set_disk(number),
+            None => tag.remove_disk(),
+        }
+        match disc.total {
+            Some(total) => tag.set_disk_total(total),
+            None => tag.remove_disk_total(),
+        }
+        tag.remove_key(ItemKey::SetSubtitle);
+        if !disc.subtitle.trim().is_empty() {
+            tag.insert_text(ItemKey::SetSubtitle, disc.subtitle.trim().to_owned());
+        }
     }
 
     tagged_file

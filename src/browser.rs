@@ -49,15 +49,22 @@ enum ViewMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrackFilter {
     NoReleaseDate,
+    NoGenre,
     New,
 }
 
 impl TrackFilter {
-    const OPTIONS: [Option<Self>; 3] = [None, Some(Self::NoReleaseDate), Some(Self::New)];
+    const OPTIONS: [Option<Self>; 4] = [
+        None,
+        Some(Self::NoReleaseDate),
+        Some(Self::NoGenre),
+        Some(Self::New),
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::NoReleaseDate => "No release date",
+            Self::NoGenre => "No genre",
             Self::New => "New (last 2 weeks)",
         }
     }
@@ -65,11 +72,11 @@ impl TrackFilter {
 
 const HELP_CONTROLS: [(&str, &str); 18] = [
     ("j / ↓ · k / ↑", "Move selection"),
-    ("Enter", "Toggle selected album or folder"),
-    ("→ / l", "Expand selected album or folder"),
-    ("← / h", "Collapse selected album or folder"),
+    ("Enter", "Toggle selected album, disc, or folder"),
+    ("→ / l", "Expand selected album, disc, or folder"),
+    ("← / h", "Collapse selected album, disc, or folder"),
     ("Space", "Play or stop the selected album's track list"),
-    ("e", "Edit selected album or track metadata"),
+    ("e", "Edit selected album, disc, or track metadata"),
     ("i", "Show selected file path(s)"),
     ("m", "Compare selected album metadata with MusicBrainz"),
     ("r", "Review and rename selected track(s)"),
@@ -77,7 +84,7 @@ const HELP_CONTROLS: [(&str, &str); 18] = [
     ("f", "Choose a track filter"),
     (
         "c",
-        "Toggle selected track, album, or folder in the M4A queue",
+        "Toggle selected track, disc, album, or folder in the M4A queue",
     ),
     ("C", "Review queued conversions, then start ready tracks"),
     ("d", "Review verified originals before deletion"),
@@ -99,18 +106,21 @@ enum LibraryRow {
     Album(usize),
     FolderGroup(usize),
     FolderAlbum(usize),
+    Disc { album: usize, disc: Option<u32> },
     Track { album: usize, track: usize },
 }
 
 enum BrowserSelection {
     Album(PathBuf),
+    Disc(PathBuf),
     Group(String),
     Track(PathBuf),
 }
 
 #[derive(Clone, Copy)]
 enum EditorTarget {
-    Album(usize),
+    Album { album: usize, edit_disc: bool },
+    Disc { album: usize, disc: Option<u32> },
     Track { album: usize, track: usize },
 }
 
@@ -120,6 +130,18 @@ struct MetadataEditor {
     active_field: usize,
     cursor_positions: Vec<usize>,
     validation_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParsedDiscMetadata {
+    number: Option<u32>,
+    total: Option<u32>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MetadataValidationError {
+    field: &'static str,
+    message: String,
 }
 
 struct PathInspector {
@@ -265,9 +287,51 @@ impl RenamePreview {
 impl MetadataEditor {
     fn labels(&self) -> &[&str] {
         match self.target {
-            EditorTarget::Album(_) => &["Album artist", "Album", "Release date"],
-            EditorTarget::Track { .. } => &["Title", "Artist", "Album", "Release date"],
+            EditorTarget::Album {
+                edit_disc: false, ..
+            } => &["Album artist", "Album", "Genre", "Release date"],
+            EditorTarget::Album {
+                edit_disc: true, ..
+            } => &[
+                "Album artist",
+                "Album",
+                "Genre",
+                "Disc number",
+                "Disc total",
+                "Disc subtitle",
+                "Release date",
+            ],
+            EditorTarget::Disc { .. } => &[
+                "Album",
+                "Genre",
+                "Disc number",
+                "Disc total",
+                "Disc subtitle",
+                "Release date",
+            ],
+            EditorTarget::Track { .. } => &[
+                "Title",
+                "Artist",
+                "Album",
+                "Genre",
+                "Disc number",
+                "Disc total",
+                "Disc subtitle",
+                "Release date",
+            ],
         }
+    }
+
+    fn field_index(&self, label: &str) -> Option<usize> {
+        self.labels()
+            .iter()
+            .position(|candidate| *candidate == label)
+    }
+
+    fn value(&self, label: &str) -> Option<&str> {
+        self.field_index(label)
+            .and_then(|index| self.values.get(index))
+            .map(String::as_str)
     }
 
     fn move_focus(&mut self, direction: isize) {
@@ -331,10 +395,109 @@ impl MetadataEditor {
     }
 
     fn release_date(&self) -> &str {
-        self.values
-            .last()
+        self.value("Release date")
             .expect("every metadata editor has a release date field")
     }
+}
+
+fn metadata_editor(target: EditorTarget, values: Vec<String>) -> MetadataEditor {
+    let cursor_positions = values.iter().map(String::len).collect();
+    MetadataEditor {
+        target,
+        values,
+        active_field: 0,
+        cursor_positions,
+        validation_error: None,
+    }
+}
+
+fn optional_number(number: Option<u32>) -> String {
+    number.map_or_else(String::new, |number| number.to_string())
+}
+
+fn parse_optional_positive_number(value: &str, field: &'static str) -> Result<Option<u32>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|number| *number > 0)
+        .map(Some)
+        .ok_or_else(|| format!("{field} must be a positive whole number or empty."))
+}
+
+fn parse_disc_editor_fields(
+    editor: &MetadataEditor,
+) -> Result<Option<ParsedDiscMetadata>, MetadataValidationError> {
+    let Some(number_value) = editor.value("Disc number") else {
+        return Ok(None);
+    };
+    let number =
+        parse_optional_positive_number(number_value, "disc number").map_err(|message| {
+            MetadataValidationError {
+                field: "Disc number",
+                message,
+            }
+        })?;
+    let total = parse_optional_positive_number(
+        editor
+            .value("Disc total")
+            .expect("disc editors include a disc total"),
+        "disc total",
+    )
+    .map_err(|message| MetadataValidationError {
+        field: "Disc total",
+        message,
+    })?;
+    if number.is_none() && total.is_some() {
+        return Err(MetadataValidationError {
+            field: "Disc number",
+            message: "disc number is required when disc total is set.".into(),
+        });
+    }
+    if let (Some(number), Some(total)) = (number, total)
+        && number > total
+    {
+        return Err(MetadataValidationError {
+            field: "Disc total",
+            message: "disc total cannot be smaller than disc number.".into(),
+        });
+    }
+    Ok(Some(ParsedDiscMetadata { number, total }))
+}
+
+fn write_editor_metadata(
+    path: &Path,
+    editor: &MetadataEditor,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album_artist: Option<&str>,
+    disc: Option<ParsedDiscMetadata>,
+) -> Result<(), String> {
+    library::write_metadata(
+        path,
+        library::MetadataEdit {
+            title,
+            artist,
+            album_artist,
+            album: editor
+                .value("Album")
+                .expect("every metadata editor includes an album"),
+            genre: editor
+                .value("Genre")
+                .expect("every metadata editor includes a genre"),
+            release_date: editor.release_date(),
+            disc: disc.map(|disc| library::DiscMetadataEdit {
+                number: disc.number,
+                total: disc.total,
+                subtitle: editor
+                    .value("Disc subtitle")
+                    .expect("disc metadata includes a disc subtitle"),
+            }),
+        },
+    )
 }
 
 struct App {
@@ -344,6 +507,7 @@ struct App {
     folder_groups: Vec<FolderGroup>,
     view_mode: ViewMode,
     expanded_albums: BTreeSet<usize>,
+    expanded_discs: BTreeSet<(usize, Option<u32>)>,
     expanded_folder_groups: BTreeSet<usize>,
     unreadable: usize,
     state: TableState,
@@ -492,6 +656,7 @@ impl App {
             folder_groups,
             view_mode: ViewMode::AlbumMetadata,
             expanded_albums: BTreeSet::new(),
+            expanded_discs: BTreeSet::new(),
             expanded_folder_groups: BTreeSet::new(),
             unreadable,
             state,
@@ -527,6 +692,7 @@ impl App {
         self.folder_albums = group_by_folder(self.root.as_path(), tracks);
         self.folder_groups = folder_groups(&self.folder_albums);
         self.expanded_albums.clear();
+        self.expanded_discs.clear();
         self.expanded_folder_groups.clear();
         self.unreadable = unreadable;
         self.state
@@ -541,6 +707,16 @@ impl App {
                 self.active_albums()
                     .get(index)
                     .and_then(|album| album.tracks.first())
+                    .map(|track| track.path.clone())
+            })
+            .collect();
+        let expanded_disc_paths: BTreeSet<_> = self
+            .expanded_discs
+            .iter()
+            .filter_map(|&(album, disc)| {
+                self.active_albums()
+                    .get(album)
+                    .and_then(|album| first_track_for_disc(album, disc))
                     .map(|track| track.path.clone())
             })
             .collect();
@@ -563,6 +739,11 @@ impl App {
                 .folder_groups
                 .get(index)
                 .map(|group| BrowserSelection::Group(group.title.clone())),
+            Some(LibraryRow::Disc { album, disc }) => self
+                .active_albums()
+                .get(album)
+                .and_then(|album| first_track_for_disc(album, disc))
+                .map(|track| BrowserSelection::Disc(track.path.clone())),
             Some(LibraryRow::Track { album, track }) => self
                 .active_albums()
                 .get(album)
@@ -586,6 +767,19 @@ impl App {
                     .first()
                     .is_some_and(|track| expanded_album_paths.contains(&track.path))
                     .then_some(index)
+            })
+            .collect();
+        self.expanded_discs = self
+            .active_albums()
+            .iter()
+            .enumerate()
+            .flat_map(|(album_index, album)| {
+                let expanded_disc_paths = &expanded_disc_paths;
+                album_disc_keys(album).into_iter().filter_map(move |disc| {
+                    first_track_for_disc(album, disc)
+                        .is_some_and(|track| expanded_disc_paths.contains(&track.path))
+                        .then_some((album_index, disc))
+                })
             })
             .collect();
         self.expanded_folder_groups = match self.view_mode {
@@ -617,6 +811,10 @@ impl App {
                     .folder_groups
                     .get(*index)
                     .is_some_and(|group| &group.title == title),
+                (LibraryRow::Disc { album, disc }, Some(BrowserSelection::Disc(path))) => {
+                    first_track_for_disc(&self.active_albums()[*album], *disc)
+                        .is_some_and(|track| &track.path == path)
+                }
                 (LibraryRow::Track { album, track }, Some(BrowserSelection::Track(path))) => self
                     .active_albums()
                     .get(*album)
@@ -656,6 +854,7 @@ impl App {
             ViewMode::Folders => ViewMode::AlbumMetadata,
         };
         self.expanded_albums.clear();
+        self.expanded_discs.clear();
         self.expanded_folder_groups.clear();
         self.state
             .select((!self.active_albums().is_empty()).then_some(0));
@@ -765,6 +964,12 @@ impl App {
                 .flat_map(|album| self.folder_albums[*album].tracks.iter())
                 .map(|track| track.path.clone())
                 .collect(),
+            LibraryRow::Disc { album, disc } => self.active_albums()[album]
+                .tracks
+                .iter()
+                .filter(|track| track.disc_number == disc)
+                .map(|track| track.path.clone())
+                .collect(),
             LibraryRow::Track { .. } => unreachable!("track rows are handled above"),
         };
         let eligible_paths: Vec<_> = paths
@@ -813,6 +1018,14 @@ impl App {
         match self.selected_row()? {
             LibraryRow::Album(album) => Some(self.active_albums()[album].tracks.clone()),
             LibraryRow::FolderAlbum(album) => Some(self.folder_albums[album].tracks.clone()),
+            LibraryRow::Disc { album, disc } => Some(
+                self.active_albums()[album]
+                    .tracks
+                    .iter()
+                    .filter(|track| track.disc_number == disc)
+                    .cloned()
+                    .collect(),
+            ),
             LibraryRow::Track { album, track } => {
                 Some(vec![self.active_albums()[album].tracks[track].clone()])
             }
@@ -822,7 +1035,7 @@ impl App {
 
     fn open_path_inspector(&mut self) {
         let Some(tracks) = self.selected_tracks() else {
-            self.status = Some("Select an album or track to inspect its file path".into());
+            self.status = Some("Select an album, disc, or track to inspect its file path".into());
             return;
         };
         self.path_inspector = Some(PathInspector {
@@ -834,8 +1047,9 @@ impl App {
 
     fn open_musicbrainz_comparison(&mut self) {
         let Some(local) = self.selected_local_album_metadata() else {
-            self.status =
-                Some("Select an album or track to compare its metadata with MusicBrainz".into());
+            self.status = Some(
+                "Select an album, disc, or track to compare its metadata with MusicBrainz".into(),
+            );
             return;
         };
         let delay = self
@@ -860,6 +1074,7 @@ impl App {
         let album = match self.selected_row()? {
             LibraryRow::Album(index) => &self.active_albums()[index],
             LibraryRow::FolderAlbum(index) => &self.folder_albums[index],
+            LibraryRow::Disc { album, .. } => &self.active_albums()[album],
             LibraryRow::Track { album, .. } => &self.active_albums()[album],
             LibraryRow::FolderGroup(_) => return None,
         };
@@ -928,7 +1143,7 @@ impl App {
 
     fn rename_selected(&mut self) {
         let Some(tracks) = self.selected_tracks() else {
-            self.status = Some("Select an album or track to rename its file(s)".into());
+            self.status = Some("Select an album, disc, or track to rename its file(s)".into());
             return;
         };
         self.status = None;
@@ -1271,88 +1486,77 @@ impl App {
             return;
         };
         let editor = match selected {
-            LibraryRow::Album(album_index) => {
+            LibraryRow::Album(album_index) | LibraryRow::FolderAlbum(album_index) => {
                 let album = &self.active_albums()[album_index];
-                MetadataEditor {
-                    target: EditorTarget::Album(album_index),
-                    values: vec![
-                        album.artist.clone(),
-                        album.title.clone(),
-                        album
-                            .tracks
-                            .first()
-                            .and_then(|track| track.release_date.clone())
-                            .unwrap_or_default(),
-                    ],
-                    active_field: 0,
-                    cursor_positions: vec![
-                        album.artist.len(),
-                        album.title.len(),
-                        album
-                            .tracks
-                            .first()
-                            .and_then(|track| track.release_date.as_ref())
-                            .map_or(0, String::len),
-                    ],
-                    validation_error: None,
+                let first = album
+                    .tracks
+                    .first()
+                    .expect("displayed albums always contain at least one track");
+                let edit_disc = !album_has_multiple_discs(album);
+                let mut values = vec![
+                    album.artist.clone(),
+                    album.title.clone(),
+                    first.genre.clone().unwrap_or_default(),
+                ];
+                if edit_disc {
+                    values.extend([
+                        optional_number(first.disc_number),
+                        optional_number(first.disc_total),
+                        first.disc_subtitle.clone().unwrap_or_default(),
+                    ]);
                 }
-            }
-            LibraryRow::FolderAlbum(album_index) => {
-                let album = &self.folder_albums[album_index];
-                MetadataEditor {
-                    target: EditorTarget::Album(album_index),
-                    values: vec![
-                        album.artist.clone(),
-                        album.title.clone(),
-                        album
-                            .tracks
-                            .first()
-                            .and_then(|track| track.release_date.clone())
-                            .unwrap_or_default(),
-                    ],
-                    active_field: 0,
-                    cursor_positions: vec![
-                        album.artist.len(),
-                        album.title.len(),
-                        album
-                            .tracks
-                            .first()
-                            .and_then(|track| track.release_date.as_ref())
-                            .map_or(0, String::len),
-                    ],
-                    validation_error: None,
-                }
+                values.push(first.release_date.clone().unwrap_or_default());
+                metadata_editor(
+                    EditorTarget::Album {
+                        album: album_index,
+                        edit_disc,
+                    },
+                    values,
+                )
             }
             LibraryRow::FolderGroup(_) => {
-                self.status =
-                    Some("Expand a grouping folder and select an album or track to edit".into());
+                self.status = Some(
+                    "Expand a grouping folder and select an album, disc, or track to edit".into(),
+                );
                 return;
+            }
+            LibraryRow::Disc { album, disc } => {
+                let album_data = &self.active_albums()[album];
+                let first = first_track_for_disc(album_data, disc)
+                    .expect("displayed disc rows always contain at least one track");
+                metadata_editor(
+                    EditorTarget::Disc { album, disc },
+                    vec![
+                        album_data.title.clone(),
+                        first.genre.clone().unwrap_or_default(),
+                        optional_number(first.disc_number),
+                        optional_number(first.disc_total),
+                        first.disc_subtitle.clone().unwrap_or_default(),
+                        first.release_date.clone().unwrap_or_default(),
+                    ],
+                )
             }
             LibraryRow::Track {
                 album,
                 track: track_index,
             } => {
                 let track = &self.active_albums()[album].tracks[track_index];
-                MetadataEditor {
-                    target: EditorTarget::Track {
+                metadata_editor(
+                    EditorTarget::Track {
                         album,
                         track: track_index,
                     },
-                    values: vec![
+                    vec![
                         track.title.clone(),
                         track.artist.clone(),
                         track.album.clone(),
+                        track.genre.clone().unwrap_or_default(),
+                        optional_number(track.disc_number),
+                        optional_number(track.disc_total),
+                        track.disc_subtitle.clone().unwrap_or_default(),
                         track.release_date.clone().unwrap_or_default(),
                     ],
-                    active_field: 0,
-                    cursor_positions: vec![
-                        track.title.len(),
-                        track.artist.len(),
-                        track.album.len(),
-                        track.release_date.as_ref().map_or(0, String::len),
-                    ],
-                    validation_error: None,
-                }
+                )
             }
         };
         self.status = None;
@@ -1390,32 +1594,45 @@ impl App {
     fn save_editor(&mut self) {
         let mut editor = self.editor.take().expect("editor is active");
         if !library::is_valid_release_date(editor.release_date()) {
-            editor.active_field = editor.values.len() - 1;
+            editor.active_field = editor
+                .field_index("Release date")
+                .expect("every metadata editor has a release date field");
             editor.validation_error =
                 Some("Could not save: release date must use YYYY, YYYY-MM, or YYYY-MM-DD.".into());
             self.editor = Some(editor);
             return;
         }
+        let parsed_disc = match parse_disc_editor_fields(&editor) {
+            Ok(disc) => disc,
+            Err(error) => {
+                editor.active_field = editor
+                    .field_index(error.field)
+                    .expect("disc validation errors point to a visible field");
+                editor.validation_error = Some(format!("Could not save: {}", error.message));
+                self.editor = Some(editor);
+                return;
+            }
+        };
         let result = match editor.target {
-            EditorTarget::Album(album) => {
+            EditorTarget::Album { album, .. } => {
                 let paths: Vec<_> = self.active_albums()[album]
                     .tracks
                     .iter()
                     .map(|track| track.path.clone())
                     .collect();
-                let album_artist = &editor.values[0];
-                let album_name = &editor.values[1];
-                let release_date = &editor.values[2];
+                let album_artist = editor
+                    .value("Album artist")
+                    .expect("album editors include an album artist");
                 let failures: Vec<_> = paths
                     .iter()
                     .filter_map(|path| {
-                        library::write_metadata(
+                        write_editor_metadata(
                             path,
+                            &editor,
                             None,
                             None,
                             Some(album_artist),
-                            album_name,
-                            release_date,
+                            parsed_disc,
                         )
                         .err()
                     })
@@ -1430,15 +1647,38 @@ impl App {
                     )
                 }
             }
+            EditorTarget::Disc { album, disc } => {
+                let paths: Vec<_> = self.active_albums()[album]
+                    .tracks
+                    .iter()
+                    .filter(|track| track.disc_number == disc)
+                    .map(|track| track.path.clone())
+                    .collect();
+                let failures: Vec<_> = paths
+                    .iter()
+                    .filter_map(|path| {
+                        write_editor_metadata(path, &editor, None, None, None, parsed_disc).err()
+                    })
+                    .collect();
+                if failures.is_empty() {
+                    format!("Saved disc metadata for {} tracks", paths.len())
+                } else {
+                    format!(
+                        "Saved with {} write error(s): {}",
+                        failures.len(),
+                        failures[0]
+                    )
+                }
+            }
             EditorTarget::Track { album, track } => {
                 let path = self.active_albums()[album].tracks[track].path.clone();
-                match library::write_metadata(
+                match write_editor_metadata(
                     &path,
-                    Some(&editor.values[0]),
-                    Some(&editor.values[1]),
+                    &editor,
+                    editor.value("Title"),
+                    editor.value("Artist"),
                     None,
-                    &editor.values[2],
-                    &editor.values[3],
+                    parsed_disc,
                 ) {
                     Ok(()) => "Saved track metadata".into(),
                     Err(error) => format!("Could not save: {error}"),
@@ -1552,14 +1792,7 @@ impl App {
                     if self.expanded_albums.contains(&album_index)
                         || self.album_has_matching_track_artist(album)
                     {
-                        rows.extend(
-                            (0..album.tracks.len())
-                                .filter(|track| self.track_matches_filter(&album.tracks[*track]))
-                                .map(|track| LibraryRow::Track {
-                                    album: album_index,
-                                    track,
-                                }),
-                        );
+                        self.append_album_children(&mut rows, album_index, album);
                     }
                     rows
                 })
@@ -1589,17 +1822,10 @@ impl App {
                                     &self.folder_albums[album_index],
                                 )
                             {
-                                rows.extend(
-                                    (0..self.folder_albums[album_index].tracks.len())
-                                        .filter(|track| {
-                                            self.track_matches_filter(
-                                                &self.folder_albums[album_index].tracks[*track],
-                                            )
-                                        })
-                                        .map(|track| LibraryRow::Track {
-                                            album: album_index,
-                                            track,
-                                        }),
+                                self.append_album_children(
+                                    &mut rows,
+                                    album_index,
+                                    &self.folder_albums[album_index],
                                 );
                             }
                         }
@@ -1607,6 +1833,45 @@ impl App {
                     rows
                 })
                 .collect(),
+        }
+    }
+
+    fn append_album_children(&self, rows: &mut Vec<LibraryRow>, album_index: usize, album: &Album) {
+        if !album_has_multiple_discs(album) {
+            rows.extend(
+                (0..album.tracks.len())
+                    .filter(|track| self.track_matches_filter(&album.tracks[*track]))
+                    .map(|track| LibraryRow::Track {
+                        album: album_index,
+                        track,
+                    }),
+            );
+            return;
+        }
+
+        for disc in album_disc_keys(album) {
+            let matching_tracks: Vec<_> = album
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| track.disc_number == disc && self.track_matches_filter(track))
+                .map(|(index, _)| index)
+                .collect();
+            if matching_tracks.is_empty() {
+                continue;
+            }
+            rows.push(LibraryRow::Disc {
+                album: album_index,
+                disc,
+            });
+            if self.expanded_discs.contains(&(album_index, disc))
+                || self.disc_has_matching_track_artist(album, disc)
+            {
+                rows.extend(matching_tracks.into_iter().map(|track| LibraryRow::Track {
+                    album: album_index,
+                    track,
+                }));
+            }
         }
     }
 
@@ -1632,6 +1897,15 @@ impl App {
         })
     }
 
+    fn disc_has_matching_track_artist(&self, album: &Album, disc: Option<u32>) -> bool {
+        self.search.as_ref().is_some_and(|search| {
+            album
+                .tracks
+                .iter()
+                .any(|track| track.disc_number == disc && search_matches(search, &track.artist))
+        })
+    }
+
     fn album_matches(&self, album: &Album) -> bool {
         self.album_matches_search(album)
             && album
@@ -1644,6 +1918,7 @@ impl App {
         match self.active_filter {
             None => true,
             Some(TrackFilter::NoReleaseDate) => track.release_date.is_none(),
+            Some(TrackFilter::NoGenre) => track.genre.is_none(),
             Some(TrackFilter::New) => track_is_new(track),
         }
     }
@@ -1684,6 +1959,9 @@ impl App {
             Some(LibraryRow::Album(album) | LibraryRow::FolderAlbum(album)) => {
                 self.expanded_albums.insert(album);
             }
+            Some(LibraryRow::Disc { album, disc }) => {
+                self.expanded_discs.insert((album, disc));
+            }
             Some(LibraryRow::FolderGroup(group)) => {
                 self.expanded_folder_groups.insert(group);
             }
@@ -1698,6 +1976,11 @@ impl App {
                     self.expanded_albums.insert(album);
                 }
             }
+            Some(LibraryRow::Disc { album, disc }) => {
+                if !self.expanded_discs.remove(&(album, disc)) {
+                    self.expanded_discs.insert((album, disc));
+                }
+            }
             Some(LibraryRow::FolderGroup(group)) if !self.expanded_folder_groups.remove(&group) => {
                 self.expanded_folder_groups.insert(group);
             }
@@ -1707,18 +1990,38 @@ impl App {
     }
 
     fn collapse_selected_album(&mut self) {
-        let album = match self.selected_row() {
-            Some(
-                LibraryRow::Album(album)
-                | LibraryRow::FolderAlbum(album)
-                | LibraryRow::Track { album, .. },
-            ) => album,
-            Some(LibraryRow::FolderGroup(group)) => {
-                self.expanded_folder_groups.remove(&group);
-                return;
-            }
-            None => return,
+        let Some(selected) = self.selected_row() else {
+            return;
         };
+        match selected {
+            LibraryRow::FolderGroup(group) => {
+                self.expanded_folder_groups.remove(&group);
+            }
+            LibraryRow::Disc { album, disc } => {
+                if self.expanded_discs.remove(&(album, disc)) {
+                    return;
+                }
+                self.collapse_album_and_select(album);
+            }
+            LibraryRow::Track { album, track }
+                if album_has_multiple_discs(&self.active_albums()[album]) =>
+            {
+                let disc = self.active_albums()[album].tracks[track].disc_number;
+                self.expanded_discs.remove(&(album, disc));
+                if let Some(disc_row) = self.visible_rows().iter().position(|row| {
+                    matches!(row, LibraryRow::Disc { album: row_album, disc: row_disc }
+                        if *row_album == album && *row_disc == disc)
+                }) {
+                    self.state.select(Some(disc_row));
+                }
+            }
+            LibraryRow::Album(album)
+            | LibraryRow::FolderAlbum(album)
+            | LibraryRow::Track { album, .. } => self.collapse_album_and_select(album),
+        }
+    }
+
+    fn collapse_album_and_select(&mut self, album: usize) {
         if let Some(album_row) = self
             .visible_rows()
             .iter()
@@ -1727,6 +2030,8 @@ impl App {
             })
         {
             self.expanded_albums.remove(&album);
+            self.expanded_discs
+                .retain(|(expanded_album, _)| *expanded_album != album);
             self.state.select(Some(album_row));
         }
     }
@@ -1751,6 +2056,40 @@ fn search_match_style(matches: bool) -> Style {
     } else {
         Style::default()
     }
+}
+
+fn album_disc_keys(album: &Album) -> Vec<Option<u32>> {
+    let mut discs: Vec<_> = album
+        .tracks
+        .iter()
+        .map(|track| track.disc_number)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    discs.sort_by_key(|disc| disc.unwrap_or(u32::MAX));
+    discs
+}
+
+fn album_has_multiple_discs(album: &Album) -> bool {
+    album_disc_keys(album).len() > 1
+        || album
+            .tracks
+            .iter()
+            .any(|track| track.disc_total.is_some_and(|total| total > 1))
+}
+
+fn album_disc_count(album: &Album) -> usize {
+    let tagged_total = album
+        .tracks
+        .iter()
+        .filter_map(|track| track.disc_total)
+        .max()
+        .unwrap_or(0) as usize;
+    tagged_total.max(album_disc_keys(album).len())
+}
+
+fn first_track_for_disc(album: &Album, disc: Option<u32>) -> Option<&Track> {
+    album.tracks.iter().find(|track| track.disc_number == disc)
 }
 
 fn group_by_album(tracks: Vec<Track>) -> Vec<Album> {
@@ -1838,9 +2177,14 @@ fn folder_name(path: &Path, fallback: &str) -> String {
 fn sort_album_tracks(albums: &mut [Album]) {
     for album in albums {
         album.tracks.sort_by(|left, right| {
-            left.track_number
+            left.disc_number
                 .unwrap_or(u32::MAX)
-                .cmp(&right.track_number.unwrap_or(u32::MAX))
+                .cmp(&right.disc_number.unwrap_or(u32::MAX))
+                .then(
+                    left.track_number
+                        .unwrap_or(u32::MAX)
+                        .cmp(&right.track_number.unwrap_or(u32::MAX)),
+                )
                 .then(left.title.cmp(&right.title))
         });
     }
@@ -2035,6 +2379,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     };
     let folder_groups = &app.folder_groups;
     let expanded_albums = &app.expanded_albums;
+    let expanded_discs = &app.expanded_discs;
     let expanded_folder_groups = &app.expanded_folder_groups;
     let queued_paths = &app.conversion_queue;
     let search = app.search.clone();
@@ -2084,9 +2429,14 @@ fn render(frame: &mut Frame, app: &mut App) {
                 Cell::from(format!("{marker} [ALBUM] {}", album.title))
                     .style(search_match_style(title_matches)),
                 Cell::from(album.artist.clone()).style(search_match_style(artist_matches)),
-                Cell::from(match view_mode {
-                    ViewMode::AlbumMetadata => format!("{} tracks", album.tracks.len()),
-                    ViewMode::Folders => format!("{} tracks", album.tracks.len()),
+                Cell::from(if album_has_multiple_discs(album) {
+                    format!(
+                        "{} discs · {} tracks",
+                        album_disc_count(album),
+                        album.tracks.len()
+                    )
+                } else {
+                    format!("{} tracks", album.tracks.len())
                 }),
                 Cell::from(
                     album
@@ -2108,8 +2458,58 @@ fn render(frame: &mut Frame, app: &mut App) {
             ])
             .style(Style::default().fg(EMPHASIS).add_modifier(Modifier::BOLD))
         }
+        LibraryRow::Disc {
+            album: album_index,
+            disc,
+        } => {
+            let album = &albums[album_index];
+            let disc_tracks: Vec<_> = album
+                .tracks
+                .iter()
+                .filter(|track| track.disc_number == disc)
+                .collect();
+            let first = disc_tracks
+                .first()
+                .expect("displayed disc rows always contain tracks");
+            let marker = if expanded_discs.contains(&(album_index, disc)) {
+                "▼"
+            } else {
+                "▶"
+            };
+            let number = disc.map_or_else(|| "?".into(), |number| number.to_string());
+            let total = first
+                .disc_total
+                .map_or_else(String::new, |total| format!("/{total}"));
+            let subtitle = first
+                .disc_subtitle
+                .as_deref()
+                .map_or_else(String::new, |subtitle| format!(" — {subtitle}"));
+            Row::new([
+                Cell::from(format!("  {marker} [DISC {number}{total}]{subtitle}")),
+                Cell::from(""),
+                Cell::from(format!("{} tracks", disc_tracks.len())),
+                Cell::from(
+                    first
+                        .release_date
+                        .as_deref()
+                        .map(format_release_year)
+                        .unwrap_or("—"),
+                ),
+                Cell::from(
+                    album_duration_from_refs(&disc_tracks)
+                        .map(format_duration)
+                        .unwrap_or_else(|| "—".into()),
+                ),
+                Cell::from(album_format_summary_from_refs(&disc_tracks)),
+                Cell::from(format_bytes(
+                    disc_tracks.iter().map(|track| track.bytes).sum(),
+                )),
+            ])
+            .style(Style::default().fg(STRUCTURE).add_modifier(Modifier::BOLD))
+        }
         LibraryRow::Track { album, track } => {
-            let track = &albums[album].tracks[track];
+            let album_data = &albums[album];
+            let track = &album_data.tracks[track];
             let is_queued = queued_paths.contains(&track.path);
             let artist_matches = search
                 .as_deref()
@@ -2124,9 +2524,14 @@ fn render(frame: &mut Frame, app: &mut App) {
             } else {
                 "  "
             };
+            let tree_prefix = if album_has_multiple_discs(album_data) {
+                "    └─"
+            } else {
+                "└─"
+            };
             Row::new([
                 Cell::from(format!(
-                    "{playing_indicator}└─ {queue_indicator}{}  {}",
+                    "{playing_indicator}{tree_prefix} {queue_indicator}{}  {}",
                     track
                         .track_number
                         .map(|number| format!("{number:02}"))
@@ -2429,7 +2834,7 @@ fn render_help(frame: &mut Frame, scroll: usize) {
 
 fn render_filter_menu(frame: &mut Frame, selected: usize) {
     let width = 42.min(frame.area().width.saturating_sub(4));
-    let height = 9.min(frame.area().height.saturating_sub(4));
+    let height = 10.min(frame.area().height.saturating_sub(4));
     let popup = ratatui::layout::Rect {
         x: frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
         y: frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
@@ -3114,7 +3519,27 @@ fn album_duration(tracks: &[Track]) -> Option<Duration> {
         .reduce(|total, duration| total + duration)
 }
 
+fn album_duration_from_refs(tracks: &[&Track]) -> Option<Duration> {
+    tracks
+        .iter()
+        .filter_map(|track| track.duration)
+        .reduce(|total, duration| total + duration)
+}
+
 fn album_format_summary(tracks: &[Track]) -> String {
+    let formats: BTreeSet<_> = tracks
+        .iter()
+        .filter_map(|track| track.path.extension()?.to_str())
+        .map(str::to_ascii_uppercase)
+        .collect();
+    match formats.len() {
+        0 => "—".into(),
+        1 => formats.into_iter().next().expect("one format is present"),
+        _ => "MIXED".into(),
+    }
+}
+
+fn album_format_summary_from_refs(tracks: &[&Track]) -> String {
     let formats: BTreeSet<_> = tracks
         .iter()
         .filter_map(|track| track.path.extension()?.to_str())
@@ -3154,8 +3579,12 @@ mod tests {
             artist: artist.into(),
             album_artist: album_artist.into(),
             album: album.into(),
+            genre: Some("Hip-Hop".into()),
             release_date: Some("2005".into()),
             track_number: Some(track_number),
+            disc_number: None,
+            disc_total: None,
+            disc_subtitle: None,
             duration: Some(Duration::from_secs(180)),
             bytes: 1,
         }
@@ -3175,6 +3604,76 @@ mod tests {
                 .map(|track| track.title.as_str())
                 .collect::<Vec<_>>(),
             ["First", "Second"]
+        );
+    }
+
+    #[test]
+    fn sorts_a_multi_disc_album_by_disc_then_track_number() {
+        let mut disc_two_first = track("Disc two first", "Artist", "Artist", "Album", 1);
+        disc_two_first.disc_number = Some(2);
+        disc_two_first.disc_total = Some(2);
+        let mut disc_one_second = track("Disc one second", "Artist", "Artist", "Album", 2);
+        disc_one_second.disc_number = Some(1);
+        disc_one_second.disc_total = Some(2);
+        let mut disc_one_first = track("Disc one first", "Artist", "Artist", "Album", 1);
+        disc_one_first.disc_number = Some(1);
+        disc_one_first.disc_total = Some(2);
+
+        let albums = group_by_album(vec![disc_two_first, disc_one_second, disc_one_first]);
+
+        assert_eq!(
+            albums[0]
+                .tracks
+                .iter()
+                .map(|track| track.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Disc one first", "Disc one second", "Disc two first"]
+        );
+    }
+
+    #[test]
+    fn expanded_multi_disc_albums_show_disc_rows_before_their_tracks() {
+        let mut disc_one = track("Disc one", "Artist", "Artist", "Album", 1);
+        disc_one.disc_number = Some(1);
+        disc_one.disc_total = Some(2);
+        disc_one.disc_subtitle = Some("Studio".into());
+        let mut disc_two = track("Disc two", "Artist", "Artist", "Album", 1);
+        disc_two.disc_number = Some(2);
+        disc_two.disc_total = Some(2);
+        disc_two.disc_subtitle = Some("Live".into());
+        let mut app = App::from_tracks(PathBuf::new(), vec![disc_two, disc_one], 0);
+        app.expanded_albums.insert(0);
+
+        assert_eq!(
+            app.visible_rows(),
+            vec![
+                LibraryRow::Album(0),
+                LibraryRow::Disc {
+                    album: 0,
+                    disc: Some(1)
+                },
+                LibraryRow::Disc {
+                    album: 0,
+                    disc: Some(2)
+                },
+            ]
+        );
+
+        app.expanded_discs.insert((0, Some(2)));
+        assert_eq!(
+            app.visible_rows(),
+            vec![
+                LibraryRow::Album(0),
+                LibraryRow::Disc {
+                    album: 0,
+                    disc: Some(1)
+                },
+                LibraryRow::Disc {
+                    album: 0,
+                    disc: Some(2)
+                },
+                LibraryRow::Track { album: 0, track: 1 },
+            ]
         );
     }
 
@@ -3304,6 +3803,30 @@ mod tests {
     }
 
     #[test]
+    fn no_genre_filter_keeps_only_tracks_without_a_genre() {
+        let mut missing_genre = track("Missing genre", "Artist", "Artist", "Album", 1);
+        missing_genre.genre = None;
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![
+                missing_genre,
+                track("Has genre", "Artist", "Artist", "Album", 2),
+            ],
+            0,
+        );
+        app.active_filter = Some(TrackFilter::NoGenre);
+        app.expanded_albums.insert(0);
+
+        assert_eq!(
+            app.visible_rows(),
+            vec![
+                LibraryRow::Album(0),
+                LibraryRow::Track { album: 0, track: 0 }
+            ]
+        );
+    }
+
+    #[test]
     fn visible_library_totals_reflect_active_search_and_track_filter() {
         let mut first = track("First", "Artist One", "Artist One", "Record One", 1);
         first.release_date = None;
@@ -3328,7 +3851,10 @@ mod tests {
     #[test]
     fn metadata_editor_separates_album_artist_from_track_artist() {
         let album_editor = MetadataEditor {
-            target: EditorTarget::Album(0),
+            target: EditorTarget::Album {
+                album: 0,
+                edit_disc: true,
+            },
             values: Vec::new(),
             active_field: 0,
             cursor_positions: Vec::new(),
@@ -3343,18 +3869,102 @@ mod tests {
         };
         assert_eq!(
             album_editor.labels(),
-            ["Album artist", "Album", "Release date"]
+            [
+                "Album artist",
+                "Album",
+                "Genre",
+                "Disc number",
+                "Disc total",
+                "Disc subtitle",
+                "Release date"
+            ]
         );
         assert_eq!(
             track_editor.labels(),
-            ["Title", "Artist", "Album", "Release date"]
+            [
+                "Title",
+                "Artist",
+                "Album",
+                "Genre",
+                "Disc number",
+                "Disc total",
+                "Disc subtitle",
+                "Release date"
+            ]
+        );
+    }
+
+    #[test]
+    fn album_and_disc_editors_protect_multi_disc_metadata() {
+        let mut disc_one = track("Disc one", "Artist", "Artist", "Album", 1);
+        disc_one.disc_number = Some(1);
+        disc_one.disc_total = Some(2);
+        let mut disc_two = track("Disc two", "Artist", "Artist", "Album", 1);
+        disc_two.disc_number = Some(2);
+        disc_two.disc_total = Some(2);
+        let mut app = App::from_tracks(PathBuf::new(), vec![disc_one, disc_two], 0);
+
+        app.open_editor();
+        let album_editor = app.editor.take().unwrap();
+        assert!(!album_editor.labels().contains(&"Disc number"));
+
+        app.expanded_albums.insert(0);
+        app.state.select(Some(1));
+        app.open_editor();
+        let disc_editor = app.editor.as_ref().unwrap();
+        assert_eq!(disc_editor.value("Disc number"), Some("1"));
+        assert_eq!(disc_editor.value("Disc total"), Some("2"));
+    }
+
+    #[test]
+    fn untagged_single_album_editor_can_assign_disc_metadata_in_bulk() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![track("Song", "Artist", "Artist", "Ripped disc", 1)],
+            0,
+        );
+
+        app.open_editor();
+
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.labels().contains(&"Genre"));
+        assert!(editor.labels().contains(&"Disc number"));
+        assert_eq!(editor.value("Disc number"), Some(""));
+    }
+
+    #[test]
+    fn disc_editor_validation_rejects_impossible_numbers() {
+        let editor = metadata_editor(
+            EditorTarget::Disc {
+                album: 0,
+                disc: Some(2),
+            },
+            vec![
+                "Album".into(),
+                "Genre".into(),
+                "3".into(),
+                "2".into(),
+                "Bonus".into(),
+                "2005".into(),
+            ],
+        );
+
+        assert_eq!(
+            parse_disc_editor_fields(&editor),
+            Err(MetadataValidationError {
+                field: "Disc total",
+                message: "disc total cannot be smaller than disc number.".into()
+            })
         );
     }
 
     #[test]
     fn metadata_editor_edits_at_a_unicode_aware_cursor() {
         let mut editor = MetadataEditor {
-            target: EditorTarget::Album(0),
+            target: EditorTarget::Album {
+                album: 0,
+                edit_disc: false,
+            },
             values: vec!["Beyoncé".into()],
             active_field: 0,
             cursor_positions: vec!["Beyoncé".len()],
@@ -3565,13 +4175,14 @@ mod tests {
         );
         app.open_editor();
         let editor = app.editor.as_mut().unwrap();
-        editor.values[2] = "2024-13".into();
+        let release_date = editor.field_index("Release date").unwrap();
+        editor.values[release_date] = "2024-13".into();
         editor.active_field = 0;
 
         app.save_editor();
 
         let editor = app.editor.as_ref().unwrap();
-        assert_eq!(editor.active_field, 2);
+        assert_eq!(editor.active_field, release_date);
         assert_eq!(
             editor.validation_error.as_deref(),
             Some("Could not save: release date must use YYYY, YYYY-MM, or YYYY-MM-DD.")

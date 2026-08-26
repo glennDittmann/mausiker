@@ -7,13 +7,17 @@
 ## Current capabilities
 
 - Recursively scan common audio files and read their metadata without changing them.
-- Browse a library grouped by album and primary artist; expand albums to see their tracks.
+- Browse a library grouped by album and primary artist; expand multi-disc albums into discs and tracks.
 - Show track numbers, album duration, file size, format, and release year.
 - Search album titles, primary artists, and featured track artists.
+- Filter tracks missing either a release date or genre.
 - Edit metadata from the terminal:
-  - Album edits update the album title and release date across all tracks in that album.
-  - Track edits update the title, album title, and release date for that track only.
+  - Album edits update the album artist, title, genre, and release date across all tracks in that album.
+  - Single-disc album edits can assign disc number, disc total, and disc subtitle across the ripped disc in one save.
+  - Multi-disc albums expand into separately editable disc rows; album-level edits preserve their different disc tags.
+  - Track edits update the title, artist, album, genre, release date, and disc metadata for that track only.
   - Release dates are validated as `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` before saving.
+  - Disc numbers are validated as positive whole numbers, with the disc number no greater than the disc total.
   - Edit fields have a blinking cursor; use `←` and `→` to insert, backspace, or delete text in place.
 - Rename a selected track or all tracks in a selected album to `NN_Title.ext`, preserving their audio-file extension.
 - Inspect the full file path for a selected track or album before renaming.
@@ -28,23 +32,31 @@
 | Key | Action |
 | --- | --- |
 | `j / ↓ · k / ↑` | Move selection |
-| `Enter` | Toggle selected album or folder |
-| `→ / l` | Expand selected album or folder |
-| `← / h` | Collapse selected album or folder |
+| `Enter` | Toggle selected album, disc, or folder |
+| `→ / l` | Expand selected album, disc, or folder |
+| `← / h` | Collapse selected album, disc, or folder |
 | `Space` | Play or stop the selected album's track list |
-| `e` | Edit selected album or track metadata |
+| `e` | Edit selected album, disc, or track metadata |
 | `i` | Show selected file path(s) |
 | `m` | Compare selected album metadata with MusicBrainz |
 | `r` | Review and rename selected track(s) |
 | `v` | Toggle album-metadata and folder views |
 | `f` | Choose a track filter |
-| `c` | Toggle selected track, album, or folder in the M4A queue |
+| `c` | Toggle selected track, disc, album, or folder in the M4A queue |
 | `C` | Review queued conversions, then start ready tracks |
 | `d` | Review verified originals before deletion |
 | `Ctrl-K` | Search albums and artists |
 | `?` | Open or close this help |
 | `Esc` | Cancel, clear search, or quit |
 | `q` | Quit |
+
+## Repairing split multi-disc albums
+
+If a rip appears as one album per disc, edit each album row and give both discs the same album
+title and album artist. In the same dialog, set the first disc to `1` of `2` and the second to
+`2` of `2`; optionally give each a distinct disc subtitle. After both saves, Mausiker groups the
+tracks into one album with separately expandable disc rows. Selecting a disc row and pressing `e`
+updates that disc without changing the other disc's number or subtitle.
 
 ## Playback requirement
 
