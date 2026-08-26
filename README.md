@@ -15,9 +15,10 @@
   - Album edits update the album artist, title, genre, and release date across all tracks in that album.
   - Single-disc album edits can assign disc number, disc total, and disc subtitle across the ripped disc in one save.
   - Multi-disc albums expand into separately editable disc rows; album-level edits preserve their different disc tags.
-  - Track edits update the title, artist, album, genre, release date, and disc metadata for that track only.
+  - Track edits update the title, artist, album, genre, track number, release date, and disc metadata for that track only.
   - Release dates are validated as `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` before saving.
   - Disc numbers are validated as positive whole numbers, with the disc number no greater than the disc total.
+  - Track numbers are read from the audio metadata, shown in the library and track editor, and validated as positive whole numbers.
   - Edit fields have a blinking cursor; use `←` and `→` to insert, backspace, or delete text in place.
 - Rename a selected track or all tracks in a selected album to `NN_Title.ext`, preserving their audio-file extension.
 - Inspect the full file path for a selected track or album before renaming.

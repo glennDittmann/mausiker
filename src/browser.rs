@@ -314,6 +314,7 @@ impl MetadataEditor {
                 "Artist",
                 "Album",
                 "Genre",
+                "Track number",
                 "Disc number",
                 "Disc total",
                 "Disc subtitle",
@@ -474,6 +475,7 @@ fn write_editor_metadata(
     title: Option<&str>,
     artist: Option<&str>,
     album_artist: Option<&str>,
+    track_number: Option<Option<u32>>,
     disc: Option<ParsedDiscMetadata>,
 ) -> Result<(), String> {
     library::write_metadata(
@@ -489,6 +491,7 @@ fn write_editor_metadata(
                 .value("Genre")
                 .expect("every metadata editor includes a genre"),
             release_date: editor.release_date(),
+            track_number,
             disc: disc.map(|disc| library::DiscMetadataEdit {
                 number: disc.number,
                 total: disc.total,
@@ -1551,6 +1554,7 @@ impl App {
                         track.artist.clone(),
                         track.album.clone(),
                         track.genre.clone().unwrap_or_default(),
+                        optional_number(track.track_number),
                         optional_number(track.disc_number),
                         optional_number(track.disc_total),
                         track.disc_subtitle.clone().unwrap_or_default(),
@@ -1613,6 +1617,20 @@ impl App {
                 return;
             }
         };
+        let parsed_track_number = match editor.value("Track number") {
+            None => None,
+            Some(value) => match parse_optional_positive_number(value, "track number") {
+                Ok(number) => Some(number),
+                Err(error) => {
+                    editor.active_field = editor
+                        .field_index("Track number")
+                        .expect("track number validation points to a visible field");
+                    editor.validation_error = Some(format!("Could not save: {error}"));
+                    self.editor = Some(editor);
+                    return;
+                }
+            },
+        };
         let result = match editor.target {
             EditorTarget::Album { album, .. } => {
                 let paths: Vec<_> = self.active_albums()[album]
@@ -1632,6 +1650,7 @@ impl App {
                             None,
                             None,
                             Some(album_artist),
+                            None,
                             parsed_disc,
                         )
                         .err()
@@ -1657,7 +1676,8 @@ impl App {
                 let failures: Vec<_> = paths
                     .iter()
                     .filter_map(|path| {
-                        write_editor_metadata(path, &editor, None, None, None, parsed_disc).err()
+                        write_editor_metadata(path, &editor, None, None, None, None, parsed_disc)
+                            .err()
                     })
                     .collect();
                 if failures.is_empty() {
@@ -1678,6 +1698,7 @@ impl App {
                     editor.value("Title"),
                     editor.value("Artist"),
                     None,
+                    parsed_track_number,
                     parsed_disc,
                 ) {
                     Ok(()) => "Saved track metadata".into(),
@@ -3886,6 +3907,7 @@ mod tests {
                 "Artist",
                 "Album",
                 "Genre",
+                "Track number",
                 "Disc number",
                 "Disc total",
                 "Disc subtitle",
@@ -3955,6 +3977,46 @@ mod tests {
                 field: "Disc total",
                 message: "disc total cannot be smaller than disc number.".into()
             })
+        );
+    }
+
+    #[test]
+    fn track_editor_shows_the_metadata_track_number() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![track("Song", "Artist", "Artist", "Album", 18)],
+            0,
+        );
+        app.expanded_albums.insert(0);
+        app.state.select(Some(1));
+
+        app.open_editor();
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.value("Track number"), Some("18"));
+    }
+
+    #[test]
+    fn track_number_validation_rejects_zero_before_writing() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![track("Song", "Artist", "Artist", "Album", 18)],
+            0,
+        );
+        app.expanded_albums.insert(0);
+        app.state.select(Some(1));
+        app.open_editor();
+        let editor = app.editor.as_mut().unwrap();
+        let track_number = editor.field_index("Track number").unwrap();
+        editor.values[track_number] = "0".into();
+
+        app.save_editor();
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.active_field, track_number);
+        assert_eq!(
+            editor.validation_error.as_deref(),
+            Some("Could not save: track number must be a positive whole number or empty.")
         );
     }
 

@@ -43,6 +43,7 @@ pub struct MetadataEdit<'a> {
     pub album: &'a str,
     pub genre: &'a str,
     pub release_date: &'a str,
+    pub track_number: Option<Option<u32>>,
     pub disc: Option<DiscMetadataEdit<'a>>,
 }
 
@@ -184,6 +185,12 @@ pub fn write_metadata(path: &Path, edit: MetadataEdit<'_>) -> Result<(), String>
     tag.remove_key(ItemKey::RecordingDate);
     if !edit.release_date.trim().is_empty() {
         tag.insert_text(ItemKey::RecordingDate, edit.release_date.trim().to_owned());
+    }
+    if let Some(track_number) = edit.track_number {
+        match track_number {
+            Some(number) => tag.set_track(number),
+            None => tag.remove_track(),
+        }
     }
     if let Some(disc) = edit.disc {
         match disc.number {

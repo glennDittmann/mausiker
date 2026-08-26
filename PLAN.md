@@ -7,6 +7,7 @@
 - [x] Validate release-date input before saving metadata
 - [x] Read and edit genre metadata, with a `No genre` track filter
 - [x] Read, validate, and edit disc number, disc total, and disc subtitle metadata
+- [x] Show and edit per-track metadata track numbers for correcting rip numbering errors
 - [x] Show multi-disc albums as an album → disc → track hierarchy, with disc-level actions and editing
 - [x] UI refinement
   - [x] Group music by album, with expandable albums and drill-in navigation
