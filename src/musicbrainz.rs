@@ -1,9 +1,15 @@
-use std::fmt::Write;
+use std::{
+    fmt::Write,
+    sync::Mutex,
+    thread,
+    time::{Duration, Instant},
+};
 
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 
-const API_ROOT: &str = "https://musicbrainz.org/ws/2/release";
+const API_ROOT: &str = "https://musicbrainz.org/ws/2";
 const USER_AGENT: &str = "mausiker/0.1.0 (https://github.com/glennDittmann/mausiker)";
+static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlbumMatch {
@@ -14,15 +20,57 @@ pub struct AlbumMatch {
     pub country: Option<String>,
     pub format: Option<String>,
     pub score: Option<u32>,
+    pub genres: Vec<String>,
 }
 
 pub fn find_album(title: &str, artist: &str) -> Result<Option<AlbumMatch>, String> {
     let query = format!("release:\"{title}\" AND artist:\"{artist}\"");
     let url = format!(
-        "{API_ROOT}?query={}&limit=5&fmt=json",
+        "{API_ROOT}/release?query={}&limit=5&fmt=json",
         percent_encode(&query)
     );
-    let mut response = ureq::get(&url)
+    let response: SearchResponse = request_json(&url)?;
+    let Some(release) = response
+        .releases
+        .into_iter()
+        .max_by_key(|release| match_score(release, title, artist))
+    else {
+        return Ok(None);
+    };
+    let genres = match release
+        .release_group
+        .as_ref()
+        .and_then(|group| group.id.as_deref())
+    {
+        Some(release_group_id) => find_release_group_genres(release_group_id)?,
+        None => Vec::new(),
+    };
+
+    Ok(Some(AlbumMatch::from_release(release, genres)))
+}
+
+fn find_release_group_genres(release_group_id: &str) -> Result<Vec<String>, String> {
+    let url = format!(
+        "{API_ROOT}/release-group/{}?inc=genres&fmt=json",
+        percent_encode(release_group_id)
+    );
+    let response: GenreResponse = request_json(&url)?;
+    Ok(ranked_genres(response.genres))
+}
+
+fn ranked_genres(mut genres: Vec<Genre>) -> Vec<String> {
+    genres.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    genres.into_iter().map(|genre| genre.name).collect()
+}
+
+fn request_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
+    wait_for_request_slot();
+    let mut response = ureq::get(url)
         .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|error| format!("MusicBrainz request failed: {error}"))?;
@@ -30,14 +78,22 @@ pub fn find_album(title: &str, artist: &str) -> Result<Option<AlbumMatch>, Strin
         .body_mut()
         .read_to_string()
         .map_err(|error| format!("Could not read MusicBrainz response: {error}"))?;
-    let response: SearchResponse = serde_json::from_str(&body)
-        .map_err(|error| format!("Could not parse MusicBrainz response: {error}"))?;
+    serde_json::from_str(&body)
+        .map_err(|error| format!("Could not parse MusicBrainz response: {error}"))
+}
 
-    Ok(response
-        .releases
-        .into_iter()
-        .max_by_key(|release| match_score(release, title, artist))
-        .map(AlbumMatch::from))
+fn wait_for_request_slot() {
+    let mut last_request = LAST_REQUEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(delay) = last_request
+        .as_ref()
+        .and_then(|last| Duration::from_secs(1).checked_sub(last.elapsed()))
+    {
+        // Holding the lock while waiting also serializes concurrently started lookups.
+        thread::sleep(delay);
+    }
+    *last_request = Some(Instant::now());
 }
 
 fn match_score(release: &Release, title: &str, artist: &str) -> u32 {
@@ -50,6 +106,12 @@ fn match_score(release: &Release, title: &str, artist: &str) -> u32 {
 
 impl From<Release> for AlbumMatch {
     fn from(release: Release) -> Self {
+        Self::from_release(release, Vec::new())
+    }
+}
+
+impl AlbumMatch {
+    fn from_release(release: Release, genres: Vec<String>) -> Self {
         let score = score_value(&release.score);
         Self {
             title: release.title,
@@ -61,6 +123,7 @@ impl From<Release> for AlbumMatch {
             country: release.country,
             format: release.media.into_iter().find_map(|medium| medium.format),
             score,
+            genres,
         }
     }
 }
@@ -129,8 +192,22 @@ struct Medium {
 
 #[derive(Deserialize)]
 struct ReleaseGroup {
+    id: Option<String>,
     #[serde(rename = "first-release-date")]
     first_release_date: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GenreResponse {
+    #[serde(default)]
+    genres: Vec<Genre>,
+}
+
+#[derive(Deserialize)]
+struct Genre {
+    name: String,
+    #[serde(default)]
+    count: i32,
 }
 
 #[cfg(test)]
@@ -158,5 +235,19 @@ mod tests {
         assert_eq!(album.release_date.as_deref(), Some("1994-04-19"));
         assert_eq!(album.track_count, Some(10));
         assert_eq!(album.format.as_deref(), Some("CD"));
+        assert!(album.genres.is_empty());
+    }
+
+    #[test]
+    fn ranks_release_group_genres_by_vote_count() {
+        let response: GenreResponse = serde_json::from_str(
+            r#"{"genres":[{"name":"rap","count":3},{"name":"hip hop","count":12},{"name":"east coast hip hop","count":7}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ranked_genres(response.genres),
+            ["hip hop", "east coast hip hop", "rap"]
+        );
     }
 }

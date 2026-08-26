@@ -212,6 +212,17 @@ pub fn write_metadata(path: &Path, edit: MetadataEdit<'_>) -> Result<(), String>
         .map_err(|error| error.to_string())
 }
 
+pub fn write_genre(path: &Path, genre: &str) -> Result<(), String> {
+    let mut tagged_file = read_from_path(path).map_err(|error| error.to_string())?;
+    let tag = tagged_file
+        .primary_tag_mut()
+        .ok_or_else(|| "the file has no writable primary tag".to_owned())?;
+    tag.set_genre(genre.trim().to_owned());
+    tagged_file
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|error| error.to_string())
+}
+
 pub fn main_artist_from_credit(artist: Option<&str>) -> String {
     let artist = artist.unwrap_or("Unknown artist").trim();
     let lowercase = artist.to_ascii_lowercase();

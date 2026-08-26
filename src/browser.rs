@@ -78,7 +78,7 @@ const HELP_CONTROLS: [(&str, &str); 18] = [
     ("Space", "Play or stop the selected album's track list"),
     ("e", "Edit selected album, disc, or track metadata"),
     ("i", "Show selected file path(s)"),
-    ("m", "Compare selected album metadata with MusicBrainz"),
+    ("m", "Compare metadata and fetch MusicBrainz genres"),
     ("r", "Review and rename selected track(s)"),
     ("v", "Toggle album-metadata and folder views"),
     ("f", "Choose a track filter"),
@@ -154,8 +154,28 @@ struct PathInspector {
 struct LocalAlbumMetadata {
     title: String,
     artist: String,
+    genre: Option<String>,
     release_date: Option<String>,
     track_count: usize,
+    paths: Vec<PathBuf>,
+    target: MusicBrainzTarget,
+}
+
+#[derive(Clone, Copy)]
+enum MusicBrainzTarget {
+    Album,
+    Disc,
+    Track,
+}
+
+impl MusicBrainzTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Album => "album",
+            Self::Disc => "disc",
+            Self::Track => "track",
+        }
+    }
 }
 
 enum MusicBrainzComparison {
@@ -520,7 +540,6 @@ struct App {
     path_inspector: Option<PathInspector>,
     musicbrainz_comparison: Option<MusicBrainzComparison>,
     musicbrainz_receiver: Option<Receiver<Result<Option<AlbumMatch>, String>>>,
-    musicbrainz_last_request: Option<Instant>,
     status: Option<String>,
     playback: Option<Playback>,
     conversion_queue: Vec<PathBuf>,
@@ -592,9 +611,7 @@ pub fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> io::Result<()> {
                     continue;
                 }
                 if app.musicbrainz_comparison.is_some() {
-                    if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('m')) {
-                        app.musicbrainz_comparison = None;
-                    }
+                    app.handle_musicbrainz_comparison_key(key.code);
                     continue;
                 }
                 if app.conversion_progress.is_some() {
@@ -669,7 +686,6 @@ impl App {
             path_inspector: None,
             musicbrainz_comparison: None,
             musicbrainz_receiver: None,
-            musicbrainz_last_request: None,
             status: None,
             playback: None,
             conversion_queue: Vec::new(),
@@ -1055,17 +1071,10 @@ impl App {
             );
             return;
         };
-        let delay = self
-            .musicbrainz_last_request
-            .and_then(|last_request| Duration::from_secs(1).checked_sub(last_request.elapsed()));
-        self.musicbrainz_last_request = Some(Instant::now());
         let (sender, receiver) = mpsc::channel();
         let title = local.title.clone();
         let artist = local.artist.clone();
         thread::spawn(move || {
-            if let Some(delay) = delay {
-                thread::sleep(delay);
-            }
             let _ = sender.send(musicbrainz::find_album(&title, &artist));
         });
         self.status = None;
@@ -1074,21 +1083,32 @@ impl App {
     }
 
     fn selected_local_album_metadata(&self) -> Option<LocalAlbumMetadata> {
-        let album = match self.selected_row()? {
+        let row = self.selected_row()?;
+        let album = match row {
             LibraryRow::Album(index) => &self.active_albums()[index],
             LibraryRow::FolderAlbum(index) => &self.folder_albums[index],
             LibraryRow::Disc { album, .. } => &self.active_albums()[album],
             LibraryRow::Track { album, .. } => &self.active_albums()[album],
             LibraryRow::FolderGroup(_) => return None,
         };
+        let target = match row {
+            LibraryRow::Album(_) | LibraryRow::FolderAlbum(_) => MusicBrainzTarget::Album,
+            LibraryRow::Disc { .. } => MusicBrainzTarget::Disc,
+            LibraryRow::Track { .. } => MusicBrainzTarget::Track,
+            LibraryRow::FolderGroup(_) => return None,
+        };
+        let tracks = self.selected_tracks()?;
         Some(LocalAlbumMetadata {
             title: album.title.clone(),
             artist: album.artist.clone(),
+            genre: genre_summary(&tracks),
             release_date: album
                 .tracks
                 .first()
                 .and_then(|track| track.release_date.clone()),
             track_count: album.tracks.len(),
+            paths: tracks.into_iter().map(|track| track.path).collect(),
+            target,
         })
     }
 
@@ -1110,6 +1130,57 @@ impl App {
         self.musicbrainz_comparison = Some(match result {
             Ok(remote) => MusicBrainzComparison::Ready { local, remote },
             Err(error) => MusicBrainzComparison::Failed { local, error },
+        });
+    }
+
+    fn handle_musicbrainz_comparison_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('m') => {
+                self.musicbrainz_comparison = None;
+            }
+            KeyCode::Char('g') => self.apply_musicbrainz_genre(),
+            _ => {}
+        }
+    }
+
+    fn apply_musicbrainz_genre(&mut self) {
+        let Some((genre, paths, target)) =
+            self.musicbrainz_comparison
+                .as_ref()
+                .and_then(|comparison| match comparison {
+                    MusicBrainzComparison::Ready {
+                        local,
+                        remote: Some(remote),
+                    } => remote
+                        .genres
+                        .first()
+                        .map(|genre| (genre.clone(), local.paths.clone(), local.target)),
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let failures: Vec<_> = paths
+            .iter()
+            .filter_map(|path| library::write_genre(path, &genre).err())
+            .collect();
+        let saved = paths.len() - failures.len();
+        self.musicbrainz_comparison = None;
+        if saved > 0 {
+            self.rescan_preserving_browser_state();
+        }
+        self.status = Some(if failures.is_empty() {
+            format!(
+                "Applied MusicBrainz genre \"{genre}\" to selected {} ({} track(s))",
+                target.label(),
+                paths.len()
+            )
+        } else {
+            format!(
+                "Applied genre to {saved} track(s); {} write error(s): {}",
+                failures.len(),
+                failures[0]
+            )
         });
     }
 
@@ -2686,7 +2757,7 @@ fn render_musicbrainz_comparison(frame: &mut Frame, comparison: &MusicBrainzComp
                 "Searching MusicBrainz…",
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )],
-            "Read-only comparison · searching the best album match".into(),
+            "Searching for the best album match and its release-group genres".into(),
         ),
         MusicBrainzComparison::Ready {
             local,
@@ -2696,7 +2767,7 @@ fn render_musicbrainz_comparison(frame: &mut Frame, comparison: &MusicBrainzComp
             " MusicBrainz match ",
             remote_metadata_lines(remote),
             format!(
-                "Read-only comparison · best MusicBrainz match{}",
+                "Best MusicBrainz match{}",
                 remote
                     .score
                     .map(|score| format!(" ({score}% search score)"))
@@ -2713,13 +2784,13 @@ fn render_musicbrainz_comparison(frame: &mut Frame, comparison: &MusicBrainzComp
                 "No matching release found.",
                 Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
             )],
-            "Read-only comparison · no release matched the local album and artist".into(),
+            "No release matched the local album and artist".into(),
         ),
         MusicBrainzComparison::Failed { local, error } => (
             local,
             " MusicBrainz ",
             vec![Line::styled(error, Style::default().fg(DANGER))],
-            "Read-only comparison · lookup could not be completed".into(),
+            "Lookup could not be completed".into(),
         ),
     };
     let outer = overlay_block(" MusicBrainz album comparison ");
@@ -2760,18 +2831,25 @@ fn render_musicbrainz_comparison(frame: &mut Frame, comparison: &MusicBrainzComp
         ),
         remote_area,
     );
-    frame.render_widget(
-        Paragraph::new(
-            "Esc, Enter, or m to close · MusicBrainz data is never written automatically",
+    let footer = match comparison {
+        MusicBrainzComparison::Ready {
+            local,
+            remote: Some(remote),
+        } if !remote.genres.is_empty() => format!(
+            "g apply top genre to selected {} ({} track(s)) · Esc/Enter/m close",
+            local.target.label(),
+            local.paths.len()
         ),
-        footer_area,
-    );
+        _ => "Esc, Enter, or m to close · no MusicBrainz data is written".into(),
+    };
+    frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
 fn local_metadata_lines(local: &LocalAlbumMetadata) -> Vec<Line<'static>> {
     metadata_lines(vec![
         ("Album", local.title.clone()),
         ("Artist", local.artist.clone()),
+        ("Genre", local.genre.clone().unwrap_or_else(|| "—".into())),
         (
             "Release date",
             local.release_date.clone().unwrap_or_else(|| "—".into()),
@@ -2784,6 +2862,14 @@ fn remote_metadata_lines(remote: &AlbumMatch) -> Vec<Line<'static>> {
     metadata_lines(vec![
         ("Album", remote.title.clone()),
         ("Artist", remote.artist.clone()),
+        (
+            "Genres",
+            if remote.genres.is_empty() {
+                "—".into()
+            } else {
+                remote.genres.join(", ")
+            },
+        ),
         (
             "Release date",
             remote.release_date.clone().unwrap_or_else(|| "—".into()),
@@ -2804,6 +2890,24 @@ fn remote_metadata_lines(remote: &AlbumMatch) -> Vec<Line<'static>> {
             remote.format.clone().unwrap_or_else(|| "—".into()),
         ),
     ])
+}
+
+fn genre_summary(tracks: &[Track]) -> Option<String> {
+    let genres: BTreeSet<_> = tracks
+        .iter()
+        .filter_map(|track| track.genre.as_deref())
+        .collect();
+    if genres.is_empty() {
+        return None;
+    }
+    if genres.len() == 1 && tracks.iter().all(|track| track.genre.is_some()) {
+        return genres.first().map(|genre| (*genre).to_owned());
+    }
+    let mut values: Vec<_> = genres.into_iter().collect();
+    if tracks.iter().any(|track| track.genre.is_none()) {
+        values.push("—");
+    }
+    Some(format!("Mixed ({})", values.join(", ")))
 }
 
 fn metadata_lines(values: Vec<(&str, String)>) -> Vec<Line<'static>> {
@@ -4205,8 +4309,30 @@ mod tests {
 
         assert_eq!(local.title, "Album");
         assert_eq!(local.artist, "Album Artist");
+        assert_eq!(local.genre.as_deref(), Some("Hip-Hop"));
         assert_eq!(local.release_date.as_deref(), Some("1994"));
         assert_eq!(local.track_count, 1);
+        assert_eq!(local.paths, [PathBuf::from("1.mp3")]);
+    }
+
+    #[test]
+    fn musicbrainz_genre_target_is_limited_to_the_selected_track() {
+        let mut app = App::from_tracks(
+            PathBuf::new(),
+            vec![
+                track("First", "Artist", "Artist", "Album", 1),
+                track("Second", "Artist", "Artist", "Album", 2),
+            ],
+            0,
+        );
+        app.expanded_albums.insert(0);
+        app.state.select(Some(2));
+
+        let local = app.selected_local_album_metadata().unwrap();
+
+        assert!(matches!(local.target, MusicBrainzTarget::Track));
+        assert_eq!(local.paths, [PathBuf::from("2.mp3")]);
+        assert_eq!(local.track_count, 2);
     }
 
     #[test]

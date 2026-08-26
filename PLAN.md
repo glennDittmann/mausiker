@@ -41,7 +41,8 @@
 
 ## MusicBrainz comparison
 
-- [x] Compare selected album metadata with the best read-only MusicBrainz release match.
+- [x] Compare selected album metadata with the best MusicBrainz release match without changing tags automatically.
+- [x] Fetch ranked MusicBrainz release-group genres and explicitly apply the top genre to the selected album, disc, or track.
 
 ## Album artwork embedding
 
