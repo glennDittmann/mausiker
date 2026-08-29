@@ -20,7 +20,7 @@
   - Disc numbers are validated as positive whole numbers, with the disc number no greater than the disc total.
   - Track numbers are read from the audio metadata, shown in the library and track editor, and validated as positive whole numbers.
   - Edit fields have a blinking cursor; use `←` and `→` to insert, backspace, or delete text in place.
-- Rename a selected track or all tracks in a selected album to `NN_Title.ext`, preserving their audio-file extension.
+- Rename a selected track or all tracks in a selected album to `NN_Title.ext`, or `disc_D_NN_Title.ext` for multi-disc albums, preserving the audio-file extension and removing Android-incompatible question marks.
 - Inspect the full file path for a selected track or album before renaming.
 - Compare selected album or track metadata with MusicBrainz, including ranked release-group genres; press `g` in the comparison to apply only the top genre to the selected album, disc, or track.
 - Play the selected album's track list continuously from a chosen track, with an animated playback indicator and scrolling now-playing title.

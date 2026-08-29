@@ -288,7 +288,14 @@ enum RenameStatus {
     Ready,
     Unchanged,
     MissingTrackNumber,
+    MissingDiscNumber,
     Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenamePathError {
+    MissingTrackNumber,
+    MissingDiscNumber,
 }
 
 impl RenamePreview {
@@ -1052,6 +1059,16 @@ impl App {
         }
     }
 
+    fn selected_album(&self) -> Option<&Album> {
+        match self.selected_row()? {
+            LibraryRow::Album(album)
+            | LibraryRow::Disc { album, .. }
+            | LibraryRow::Track { album, .. } => self.active_albums().get(album),
+            LibraryRow::FolderAlbum(album) => self.folder_albums.get(album),
+            LibraryRow::FolderGroup(_) => None,
+        }
+    }
+
     fn open_path_inspector(&mut self) {
         let Some(tracks) = self.selected_tracks() else {
             self.status = Some("Select an album, disc, or track to inspect its file path".into());
@@ -1216,12 +1233,16 @@ impl App {
     }
 
     fn rename_selected(&mut self) {
+        let Some(multi_disc) = self.selected_album().map(album_has_multiple_discs) else {
+            self.status = Some("Select an album, disc, or track to rename its file(s)".into());
+            return;
+        };
         let Some(tracks) = self.selected_tracks() else {
             self.status = Some("Select an album, disc, or track to rename its file(s)".into());
             return;
         };
         self.status = None;
-        self.rename_preview = Some(build_rename_preview(tracks));
+        self.rename_preview = Some(build_rename_preview(tracks, multi_disc));
     }
 
     fn handle_rename_confirmation(&mut self, key: KeyCode) {
@@ -1277,7 +1298,7 @@ impl App {
             self.rescan_preserving_browser_state();
         }
         self.status = Some(match (renamed, skipped) {
-            (0, 0) => "File names already match the track numbers and titles".into(),
+            (0, 0) => "File names already match their disc/track numbers and titles".into(),
             (0, skipped) => format!("No tracks renamed; skipped {skipped}"),
             (renamed, 0) => format!("Renamed {renamed} track(s)"),
             (renamed, skipped) => format!("Renamed {renamed} track(s); skipped {skipped}"),
@@ -3046,6 +3067,13 @@ fn render_rename_confirmation(frame: &mut Frame, preview: &RenamePreview) {
                 )));
                 lines.push(Line::raw(""));
             }
+            (RenameStatus::MissingDiscNumber, _) => {
+                lines.push(Line::raw(format!(
+                    "SKIP    {} (multi-disc album, but disc number is missing)",
+                    compact_preview_path(&plan.source)
+                )));
+                lines.push(Line::raw(""));
+            }
             (RenameStatus::Conflict, Some(target)) => {
                 lines.push(Line::raw(format!(
                     "SKIP    {}",
@@ -3172,25 +3200,34 @@ fn render_editor(frame: &mut Frame, editor: &MetadataEditor) {
     }
 }
 
-fn renamed_track_path(track: &Track) -> Result<PathBuf, ()> {
-    let number = track.track_number.ok_or(())?;
+fn renamed_track_path(track: &Track, multi_disc: bool) -> Result<PathBuf, RenamePathError> {
+    let number = track
+        .track_number
+        .ok_or(RenamePathError::MissingTrackNumber)?;
+    let disc = multi_disc
+        .then(|| track.disc_number.ok_or(RenamePathError::MissingDiscNumber))
+        .transpose()?;
     let title = sanitized_file_stem(&track.title);
     let extension = track
         .path
         .extension()
         .and_then(|extension| extension.to_str());
+    let stem = match disc {
+        Some(disc) => format!("disc_{disc}_{number:02}_{title}"),
+        None => format!("{number:02}_{title}"),
+    };
     let filename = match extension {
-        Some(extension) if !extension.is_empty() => format!("{number:02}_{title}.{extension}"),
-        _ => format!("{number:02}_{title}"),
+        Some(extension) if !extension.is_empty() => format!("{stem}.{extension}"),
+        _ => stem,
     };
     Ok(track.path.with_file_name(filename))
 }
 
-fn build_rename_preview(tracks: Vec<Track>) -> RenamePreview {
+fn build_rename_preview(tracks: Vec<Track>, multi_disc: bool) -> RenamePreview {
     let proposed_targets: BTreeMap<_, _> = tracks
         .iter()
         .filter_map(|track| {
-            renamed_track_path(track)
+            renamed_track_path(track, multi_disc)
                 .ok()
                 .filter(|target| target != &track.path)
         })
@@ -3200,11 +3237,14 @@ fn build_rename_preview(tracks: Vec<Track>) -> RenamePreview {
         });
     let plans = tracks
         .into_iter()
-        .map(|track| match renamed_track_path(&track) {
-            Err(()) => RenamePlan {
+        .map(|track| match renamed_track_path(&track, multi_disc) {
+            Err(error) => RenamePlan {
                 source: track.path,
                 target: None,
-                status: RenameStatus::MissingTrackNumber,
+                status: match error {
+                    RenamePathError::MissingTrackNumber => RenameStatus::MissingTrackNumber,
+                    RenamePathError::MissingDiscNumber => RenameStatus::MissingDiscNumber,
+                },
             },
             Ok(target) if target == track.path => RenamePlan {
                 source: track.path,
@@ -3293,9 +3333,12 @@ fn compact_preview_path(path: &Path) -> String {
 fn sanitized_file_stem(title: &str) -> String {
     let mut filename = String::new();
     for character in title.trim().trim_matches('.').chars() {
+        if character == '?' {
+            continue;
+        }
         let separator = matches!(
             character,
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'
+            '/' | '\\' | ':' | '*' | '"' | '<' | '>' | '|' | '\0'
         ) || character.is_whitespace();
         if separator {
             if !filename.ends_with('_') {
@@ -4153,9 +4196,61 @@ mod tests {
         track.path = PathBuf::from("/music/old-name.FLAC");
 
         assert_eq!(
-            renamed_track_path(&track).unwrap(),
+            renamed_track_path(&track, false).unwrap(),
             PathBuf::from("/music/03_A_B_C.FLAC")
         );
+    }
+
+    #[test]
+    fn renamed_track_path_strips_question_marks_instead_of_leaving_a_separator() {
+        let mut track = track("do_you_wanna_know?", "Artist", "Artist", "Album", 3);
+        track.path = PathBuf::from("/music/old-name.m4A");
+
+        assert_eq!(
+            renamed_track_path(&track, false).unwrap(),
+            PathBuf::from("/music/03_do_you_wanna_know.m4A")
+        );
+    }
+
+    #[test]
+    fn renamed_track_path_prefixes_the_disc_for_multi_disc_albums() {
+        let mut track = track("Title", "Artist", "Artist", "Album", 3);
+        track.path = PathBuf::from("/music/old-name.m4a");
+        track.disc_number = Some(2);
+        track.disc_total = Some(2);
+
+        assert_eq!(
+            renamed_track_path(&track, true).unwrap(),
+            PathBuf::from("/music/disc_2_03_Title.m4a")
+        );
+    }
+
+    #[test]
+    fn detects_multi_disc_albums_from_numbers_or_the_declared_total() {
+        let mut disc_one = track("First", "Artist", "Artist", "Album", 1);
+        disc_one.disc_number = Some(1);
+        let mut disc_two = track("Second", "Artist", "Artist", "Album", 1);
+        disc_two.disc_number = Some(2);
+        assert!(album_has_multiple_discs(&Album {
+            group: None,
+            artist: "Artist".into(),
+            title: "Album".into(),
+            tracks: vec![disc_one.clone(), disc_two],
+        }));
+
+        disc_one.disc_total = Some(2);
+        assert!(album_has_multiple_discs(&Album {
+            group: None,
+            artist: "Artist".into(),
+            title: "Album".into(),
+            tracks: vec![disc_one],
+        }));
+        assert!(!album_has_multiple_discs(&Album {
+            group: None,
+            artist: "Artist".into(),
+            title: "Album".into(),
+            tracks: vec![track("Only", "Artist", "Artist", "Album", 1)],
+        }));
     }
 
     #[test]
@@ -4163,7 +4258,20 @@ mod tests {
         let mut track = track("Title", "Artist", "Artist", "Album", 1);
         track.track_number = None;
 
-        assert!(renamed_track_path(&track).is_err());
+        assert_eq!(
+            renamed_track_path(&track, false),
+            Err(RenamePathError::MissingTrackNumber)
+        );
+    }
+
+    #[test]
+    fn renamed_track_path_requires_a_disc_number_for_multi_disc_albums() {
+        let track = track("Title", "Artist", "Artist", "Album", 1);
+
+        assert_eq!(
+            renamed_track_path(&track, true),
+            Err(RenamePathError::MissingDiscNumber)
+        );
     }
 
     #[test]
@@ -4191,13 +4299,16 @@ mod tests {
         let mut ready = track("Ready", "Artist", "Artist", "Album", 4);
         ready.path = PathBuf::from("/not-a-real-library/old-ready.mp3");
 
-        let preview = build_rename_preview(vec![
-            unchanged,
-            missing_number,
-            duplicate_first,
-            duplicate_second,
-            ready,
-        ]);
+        let preview = build_rename_preview(
+            vec![
+                unchanged,
+                missing_number,
+                duplicate_first,
+                duplicate_second,
+                ready,
+            ],
+            false,
+        );
 
         assert_eq!(preview.ready_count(), 1);
         assert_eq!(preview.skipped_count(), 4);

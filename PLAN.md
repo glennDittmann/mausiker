@@ -24,7 +24,7 @@
 - [x] Configure subfolders to exclude from library scans
 - [x] Add a folder view: treat a track's parent as its album folder, that folder's parent as its artist, and any higher folder as a music grouping
 - [x] Mark tracks selected for queue in UI
-- [x] Automatic renaming of tracks/albums to `NN_song_name`, using the track number and title
+- [x] Automatic renaming to `NN_song_name`, or `disc_D_NN_song_name` for multi-disc albums, stripping Android-incompatible question marks
 - [x] Progress popup for music conversion
 
 ## Next UX work (highest user impact first)
